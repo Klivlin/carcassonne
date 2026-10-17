@@ -1,5 +1,5 @@
 // Правила игры. Состояние — простой JSON, чтобы его можно было пересылать по сети.
-import { TILES, features, edgeType, buildDeck, startTile, isRiver, GOODS } from './tiles.js?v=5';
+import { TILES, features, edgeType, buildDeck, startTile, isRiver, GOODS } from './tiles.js?v=7';
 
 export const COLORS = ['#d33c3c', '#2f6fd6', '#e0b419', '#2fa34a', '#222222', '#c561d6'];
 export const MEEPLES = 7;

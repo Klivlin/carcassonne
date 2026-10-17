@@ -1,5 +1,5 @@
 // Отрисовка тайлов и фишек на canvas.
-import { TILES, features, rotPoint } from './tiles.js?v=5';
+import { TILES, features, rotPoint } from './tiles.js?v=7';
 
 const CORNERS = [[[0, 0], [1, 0]], [[1, 0], [1, 1]], [[1, 1], [0, 1]], [[0, 1], [0, 0]]];
 const MIDS = [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]];

@@ -1,10 +1,10 @@
-import { TILES, features } from './tiles.js?v=5';
+import { TILES, features } from './tiles.js?v=7';
 import {
   newGame, placements, canPlace, applyTurn, applyDragon, skipTurn, figureKinds, portalTargets,
   princessTargets, dragonOptions, describe, key, unkey, COLORS, MODES,
-} from './game.js?v=5';
-import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=5';
-import * as net from './net.js?v=5';
+} from './game.js?v=7';
+import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=7';
+import * as net from './net.js?v=7';
 
 const $ = s => document.querySelector(s);
 const store = {
@@ -38,6 +38,8 @@ const app = {
   opts: store.get('carc-opts') || {},
 };
 store.set('carc-key', app.myKey);
+// Для отладки на локальном сервере.
+if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') window.__app = app;
 
 // ---------- Тема ----------
 function applyTheme(t) {
@@ -134,6 +136,17 @@ function renderModes(box, editable, opts, onChange) {
 
 const modesText = opts => Object.entries(MODES).filter(([id]) => opts && opts[id]).map(([, m]) => m.icon + ' ' + m.name).join(' · ');
 const menuMsg = t => { $('#menu-msg').textContent = t; };
+function pubLobby(l) {
+  l.v = (l.v || 0) + 1;
+  app.conn.lobby(l);
+}
+
+// Заметная плашка о проблемах со связью поверх поля.
+function netBanner(t) {
+  const b = $('#net-banner');
+  b.textContent = t ? '⚠️ ' + t : '';
+  b.classList.toggle('hidden', !t);
+}
 const lobbyMsg = t => { $('#lobby-msg').textContent = t; };
 const gameMsg = t => { $('#game-msg').textContent = t; };
 
@@ -168,9 +181,12 @@ function startOnline(code, creating) {
   history.replaceState(null, '', '?room=' + code);
   lobbyMsg(creating ? 'Создаю комнату…' : 'Подключение…');
   app.conn = net.room(code, app.myKey, myName(), {
-    onStatus: t => { lobbyMsg(t); gameMsg(t); },
+    onStatus: t => { lobbyMsg(t); netBanner(t); },
     onReady() {
-      if (app.lobby && app.lobby.owner === app.myKey) app.conn.lobby(app.lobby);
+      if (app.lobby && app.lobby.owner === app.myKey && !app.lobby.started && !app.state) pubLobby(app.lobby);
+      // После переподключения заново показываем соперникам, что примеряем.
+      lastLive = '';
+      sendLive();
       // Если на сервере нет состояния новее нашего — восстанавливаем его из своей копии.
       setTimeout(() => {
         if (app.state && newer(app.state, app.broker)) app.conn.state(app.state);
@@ -178,6 +194,8 @@ function startOnline(code, creating) {
       }, 3000);
     },
     onLobby(l) {
+      // Сообщения идут через два брокера — более старую копию лобби пропускаем.
+      if (app.lobby && (l.v || 0) < (app.lobby.v || 0)) return;
       app.lobby = l;
       save();
       update();
@@ -199,12 +217,13 @@ function startOnline(code, creating) {
         const same = l.players.find(p => p.name === name && p.key !== app.myKey && !isOnline(p.key));
         if (same) same.key = k;
         else if (l.players.length < 6) l.players.push({ name, key: k });
-        app.conn.lobby(l);
+        pubLobby(l);
       }
       if (!was) update();
     },
     onChat: addChat,
     onLive(msg) {
+      if (app.ghost && app.ghost.key === msg.key && (msg.t || 0) < (app.ghost.t || 0)) return;
       app.ghost = msg;
       drawPreview();
       draw();
@@ -239,9 +258,13 @@ function setState(s) {
 function commit(fn) {
   const next = clone(app.state);
   try { fn(next); } catch (e) { gameMsg(e.message); return; }
+  next.log = next.log.slice(-60);
   gameMsg('');
   setState(next);
-  if (app.kind === 'online') app.conn.state(next);
+  if (app.kind === 'online') {
+    app.conn.state(next);
+    if (!app.conn.connected()) gameMsg('Нет связи с сервером — ход отправится, как только связь вернётся.');
+  }
 }
 
 function leave() {
@@ -258,7 +281,7 @@ function sendChat(text, react = false) {
   if (!text || app.kind !== 'online') return;
   const m = { id: uid(), key: app.myKey, name: myName(), text: text.slice(0, 200), react, ts: Date.now() };
   addChat(m);
-  app.conn.chat(m, app.chat.slice(-30));
+  app.conn.chat(m, app.chat.slice(-20));
 }
 
 function addChat(m) {
@@ -322,14 +345,16 @@ function initChat() {
 }
 
 // ---------- Живой показ хода ----------
-let lastLive = '';
+// Не чаще раза в 120 мс: при движении мыши уходит только последнее положение.
+let lastLive = '', liveTimer = null, liveAt = 0;
 function sendLive() {
   if (app.kind !== 'online' || !app.conn || !canPlaceTile()) return;
   const msg = { seq: app.state.seq, gid: app.state.gid, tent: app.tent, hover: app.tent ? null : app.hover, rot: app.rot };
   const str = JSON.stringify(msg);
   if (str === lastLive) return;
   lastLive = str;
-  app.conn.live(msg);
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => { liveAt = Date.now(); app.conn.live({ ...msg, t: liveAt }); }, Math.max(0, 120 - (Date.now() - liveAt)));
 }
 
 // ---------- Ход ----------
@@ -829,7 +854,7 @@ function playerRow(p, i, s) {
     x.textContent = '✕';
     x.onclick = () => {
       app.lobby.players = app.lobby.players.filter(q => q.key !== p.key);
-      app.conn.lobby(app.lobby);
+      pubLobby(app.lobby);
       update();
     };
     li.append(x);
@@ -862,7 +887,7 @@ function update() {
     const ownerAway = l && !isOnline(l.owner);
     renderModes($('#lobby-modes'), owner && !app.state, (l && l.opts) || {}, o => {
       app.lobby.opts = o;
-      app.conn.lobby(app.lobby);
+      pubLobby(app.lobby);
       update();
     });
     const btn = $('#btn-start');
@@ -1021,7 +1046,7 @@ $('#btn-start').onclick = () => {
   const l = app.lobby;
   if (!l || l.players.length < 2) return;
   l.started = true;
-  app.conn.lobby(l);
+  pubLobby(l);
   const s = newGame(l.players, l.opts || {});
   setState(s);
   app.conn.state(s);
