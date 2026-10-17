@@ -23,6 +23,8 @@ const app = {
   view: { x: 0.5, y: 0.5, z: 1 },
   rot: 0,
   tent: null,            // { x, y, r, f }
+  hover: null,           // клетка под курсором { x, y }
+  ghost: null,           // что сейчас делает соперник: { key, seq, tent, hover }
   finalShown: false,
 };
 store.set('carc-key', app.myKey);
@@ -113,6 +115,7 @@ function startHost(saved) {
     onReady: () => { lobbyMsg(''); hostSync(); },
     onError: e => { lobbyMsg('Ошибка сети: ' + e.message); gameMsg('Ошибка сети: ' + e.message); },
     onLeave: () => hostSync(),
+    onLive,
     onMessage: (k, msg) => {
       if (msg.type === 'hello') {
         const inGame = app.state && app.state.players.some(p => p.key === k);
@@ -154,6 +157,7 @@ function startGuest(code) {
   show('lobby');
   app.conn = net.join(code, app.myKey, myName(), {
     onStatus: t => { lobbyMsg(t); gameMsg(t); },
+    onLive,
     onMessage: msg => {
       if (msg.type === 'sync') {
         const prevSeq = app.state ? app.state.seq : -1;
@@ -167,6 +171,24 @@ function startGuest(code) {
     },
   });
   update();
+}
+
+// ---------- Живой показ хода соперника ----------
+function onLive(msg) {
+  if (msg.key === app.myKey) return;
+  app.ghost = msg;
+  drawPreview();
+  draw();
+}
+
+let lastLive = '';
+function sendLive() {
+  if (app.kind === 'local' || !app.conn || !isMyTurn()) return;
+  const msg = { key: app.myKey, seq: app.state.seq, tent: app.tent, hover: app.tent ? null : app.hover, rot: app.rot };
+  const str = JSON.stringify(msg);
+  if (str === lastLive) return;
+  lastLive = str;
+  app.conn.live(msg);
 }
 
 const lobbyMsg = t => { $('#lobby-msg').textContent = t; };
@@ -334,6 +356,32 @@ function draw() {
     const [px, py] = toScreen(x + f.p[0], y + f.p[1]);
     drawMeeple(ctx, px, py, sz * 0.26, s.players[t.m.p].color, f.t === 'field');
   }
+  // Что сейчас делает соперник.
+  const g = app.ghost;
+  if (g && !isMyTurn() && s.phase === 'play' && g.seq === s.seq && g.key === s.players[s.turn].key) {
+    const color = s.players[s.turn].color;
+    if (g.tent) {
+      const [px, py] = toScreen(g.tent.x, g.tent.y);
+      ctx.globalAlpha = 0.85;
+      drawTile(ctx, s.current, g.tent.r, px, py, sz);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4;
+      ctx.setLineDash([10, 6]);
+      ctx.strokeRect(px, py, sz, sz);
+      ctx.setLineDash([]);
+      if (g.tent.f != null) {
+        const f = features(s.current, g.tent.r)[g.tent.f];
+        const [mx, my] = toScreen(g.tent.x + f.p[0], g.tent.y + f.p[1]);
+        drawMeeple(ctx, mx, my, sz * 0.26, color, f.t === 'field');
+      }
+    } else if (g.hover) {
+      const [px, py] = toScreen(g.hover.x, g.hover.y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(px + 2, py + 2, sz - 4, sz - 4);
+    }
+  }
   // Предварительно положенный тайл.
   if (app.tent && isMyTurn()) {
     const t = app.tent;
@@ -365,7 +413,12 @@ function draw() {
 const pctx = $('#preview').getContext('2d');
 function drawPreview() {
   pctx.clearRect(0, 0, 200, 200);
-  if (app.state && app.state.current) drawTile(pctx, app.state.current, app.tent ? app.tent.r : app.rot, 0, 0, 200);
+  const s = app.state;
+  if (!s || !s.current) return;
+  const g = app.ghost;
+  let r = app.tent ? app.tent.r : app.rot;
+  if (!isMyTurn() && g && g.seq === s.seq) r = g.tent ? g.tent.r : (g.rot || 0);
+  drawTile(pctx, s.current, r, 0, 0, 200);
 }
 
 // ---------- Панель ----------
@@ -422,6 +475,7 @@ function update() {
   if (s.phase !== 'end') $('#final').classList.add('hidden');
   drawPreview();
   draw();
+  sendLive();
 }
 
 // ---------- Ввод ----------
@@ -438,7 +492,14 @@ cv.addEventListener('pointerdown', e => {
   }
 });
 cv.addEventListener('pointermove', e => {
-  if (!pointers.has(e.pointerId)) return;
+  if (!pointers.has(e.pointerId)) {
+    if (e.pointerType === 'mouse' && app.state && isMyTurn()) {
+      const [wx, wy] = toWorld(e.offsetX, e.offsetY);
+      const h = { x: Math.floor(wx), y: Math.floor(wy) };
+      if (!app.hover || h.x !== app.hover.x || h.y !== app.hover.y) { app.hover = h; sendLive(); }
+    }
+    return;
+  }
   pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
   if (pinch && pointers.size === 2) {
     const [a, b] = [...pointers.values()];
