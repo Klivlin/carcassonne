@@ -1,51 +1,71 @@
-import { features } from './tiles.js';
-import { newGame, placements, canPlace, applyTurn, figureKinds, key, unkey, COLORS, MODES } from './game.js';
-import { drawTile, drawFigure } from './render.js';
-import * as net from './net.js';
+import { TILES, features } from './tiles.js?v=4';
+import {
+  newGame, placements, canPlace, applyTurn, applyDragon, skipTurn, figureKinds, portalTargets,
+  princessTargets, dragonOptions, describe, key, unkey, COLORS, MODES,
+} from './game.js?v=4';
+import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=4';
+import * as net from './net.js?v=4';
 
 const $ = s => document.querySelector(s);
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
-  del(k) { try { localStorage.removeItem(k); } catch { /* */ } },
 };
 const uid = () => Math.random().toString(36).slice(2, 10);
+const clone = s => JSON.parse(JSON.stringify(s));
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const isTouch = matchMedia('(pointer: coarse)').matches;
 
 const app = {
   mode: 'menu',          // menu | lobby | game
-  kind: null,            // host | guest | local
+  kind: null,            // online | local
   code: null,
   myKey: store.get('carc-key') || uid(),
-  lobby: [],
-  online: new Set(),
+  lobby: null,           // { owner, players, opts, started }
+  seen: {},              // key -> когда игрок последний раз был в сети
   state: null,
+  broker: null,          // последнее состояние, пришедшее с сервера
   conn: null,
   view: { x: 0.5, y: 0.5, z: 1 },
   rot: 0,
-  tent: null,            // { x, y, r, f }
+  tent: null,            // { x, y, r, f, kind, at, princess } — тайл, который игрок примеряет
   hover: null,           // клетка под курсором { x, y }
-  ghost: null,           // что сейчас делает соперник: { key, seq, tent, hover }
+  ghost: null,           // что сейчас делает соперник
+  hint: null,            // подсказка очков { k, f, d, sx, sy, sticky }
+  anim: null,            // анимация начисления очков { events, t0 }
+  chat: [],
   finalShown: false,
-  opts: store.get('carc-opts') || {},  // включённые дополнения
+  opts: store.get('carc-opts') || {},
 };
 store.set('carc-key', app.myKey);
+
+// ---------- Тема ----------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  for (const b of document.querySelectorAll('.theme-toggle')) b.textContent = t === 'dark' ? '☀️' : '🌙';
+  draw();
+}
+let theme = store.get('carc-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+for (const b of document.querySelectorAll('.theme-toggle')) {
+  b.onclick = () => { theme = theme === 'dark' ? 'light' : 'dark'; store.set('carc-theme', theme); applyTheme(theme); };
+}
 
 // ---------- Экраны ----------
 function show(mode) {
   app.mode = mode;
   for (const id of ['menu', 'lobby', 'game']) $('#' + id).classList.toggle('hidden', id !== mode);
-  if (mode === 'game') resize();
+  if (mode === 'game') { layout(); fitView(); }
 }
 
 function myName() {
   const n = $('#name').value.trim();
-  store.set('carc-name', n);
-  return n;
+  if (n) store.set('carc-name', n);
+  return n || store.get('carc-name') || '';
 }
 
 function initMenu() {
   $('#name').value = store.get('carc-name') || '';
-  renderModes($('#modes'), true);
+  renderModes($('#modes'), true, app.opts, o => { app.opts = o; store.set('carc-opts', o); });
   const box = $('#local-names');
   const saved = store.get('carc-local-names') || ['', ''];
   for (let i = 0; i < 6; i++) {
@@ -59,11 +79,12 @@ function initMenu() {
   if (room) $('#code').value = room.toUpperCase();
 
   const resume = $('#resume');
-  const h = store.get('carc-host');
-  if (h && h.state && h.state.phase !== 'end') {
+  const last = store.get('carc-last-room');
+  const lastSaved = last && store.get('carc-room-' + last);
+  if (lastSaved && lastSaved.state && lastSaved.state.phase !== 'end') {
     const b = document.createElement('button');
-    b.textContent = `Продолжить онлайн-игру (комната ${h.code})`;
-    b.onclick = () => startHost(h);
+    b.textContent = `Вернуться в онлайн-игру (комната ${last})`;
+    b.onclick = () => { if (myName()) startOnline(last, false); else menuMsg('Введите имя'); };
     resume.append(b);
   }
   const l = store.get('carc-local');
@@ -76,13 +97,13 @@ function initMenu() {
 
   $('#btn-host').onclick = () => {
     if (!myName()) return menuMsg('Введите имя');
-    startHost(null);
+    startOnline(net.randomCode(), true);
   };
   $('#btn-join').onclick = () => {
     const code = $('#code').value.trim().toUpperCase();
     if (!myName()) return menuMsg('Введите имя');
     if (code.length !== 5) return menuMsg('Код комнаты — 5 символов');
-    startGuest(code);
+    startOnline(code, false);
   };
   $('#code').onkeydown = e => { if (e.key === 'Enter') $('#btn-join').click(); };
   $('#btn-local').onclick = () => {
@@ -93,154 +114,241 @@ function initMenu() {
     startLocal(newGame(ps.map(name => ({ name, key: uid() })), app.opts));
   };
 }
-// Переключатели дополнений. editable=false — только просмотр (гость в лобби).
-function renderModes(box, editable) {
+
+// Переключатели дополнений.
+function renderModes(box, editable, opts, onChange) {
   box.replaceChildren(...Object.entries(MODES).map(([id, m]) => {
     const label = document.createElement('label');
-    label.className = 'mode' + (app.opts[id] ? ' on' : '');
+    label.className = 'mode' + (opts[id] ? ' on' : '');
     label.innerHTML = `<input type="checkbox"><span class="mi"></span><span><b></b><small></small></span>`;
     const cb = label.querySelector('input');
-    cb.checked = !!app.opts[id];
+    cb.checked = !!opts[id];
     cb.disabled = !editable;
     label.querySelector('.mi').textContent = m.icon;
     label.querySelector('b').textContent = m.name;
     label.querySelector('small').textContent = m.desc;
-    cb.onchange = () => {
-      app.opts = { ...app.opts, [id]: cb.checked };
-      store.set('carc-opts', app.opts);
-      label.classList.toggle('on', cb.checked);
-      if (app.kind === 'host' && !app.state) hostSync();
-    };
+    cb.onchange = () => onChange({ ...opts, [id]: cb.checked });
     return label;
   }));
 }
 
 const modesText = opts => Object.entries(MODES).filter(([id]) => opts && opts[id]).map(([, m]) => m.icon + ' ' + m.name).join(' · ');
-
 const menuMsg = t => { $('#menu-msg').textContent = t; };
+const lobbyMsg = t => { $('#lobby-msg').textContent = t; };
+const gameMsg = t => { $('#game-msg').textContent = t; };
 
-// ---------- Режимы ----------
+// ---------- Игра на одном устройстве ----------
 function startLocal(state) {
   app.kind = 'local';
   app.state = state;
-  store.set('carc-local', state);
   app.finalShown = false;
+  save();
   show('game');
-  fitView();
   update();
 }
 
-function startHost(saved) {
-  app.kind = 'host';
-  app.code = saved ? saved.code : net.randomCode();
-  app.lobby = saved ? saved.lobby : [{ name: myName(), key: app.myKey }];
-  app.state = saved ? saved.state : null;
-  app.finalShown = false;
-  history.replaceState(null, '', '?room=' + app.code);
-  app.conn = net.host(app.code, {
-    onReady: () => { lobbyMsg(''); hostSync(); },
-    onError: e => { lobbyMsg('Ошибка сети: ' + e.message); gameMsg('Ошибка сети: ' + e.message); },
-    onLeave: () => hostSync(),
-    onLive,
-    onMessage: (k, msg) => {
-      if (msg.type === 'hello') {
-        const inGame = app.state && app.state.players.some(p => p.key === k);
-        if (!app.state && !app.lobby.some(p => p.key === k)) {
-          if (app.lobby.length >= 6) return app.conn.send(k, { type: 'error', msg: 'Комната заполнена (максимум 6 игроков)' });
-          app.lobby.push({ name: msg.name, key: k });
-        } else if (app.state && !inGame) {
-          app.conn.send(k, { type: 'error', msg: 'Игра уже началась — вы смотрите как зритель' });
-        }
-        hostSync();
-      } else if (msg.type === 'move') {
-        const idx = app.state ? app.state.players.findIndex(p => p.key === k) : -1;
-        try { applyTurn(app.state, idx, msg.move); hostSync(); }
-        catch (e) { app.conn.send(k, { type: 'error', msg: e.message }); hostSync(); }
-      }
-    },
-  });
-  lobbyMsg('Создаю комнату…');
-  if (app.state) { show('game'); fitView(); } else show('lobby');
-  update();
-}
+// ---------- Онлайн без хоста ----------
+// Состояние лежит на сервере; каждый ход публикует тот, кто его сделал.
+const newer = (a, b) => !b || (a.gid !== b.gid ? a.born > b.born : a.seq > b.seq);
+// Кого ещё не слышали, первые секунды после подключения считаем в сети.
+const isOnline = k => app.kind === 'local' || k === app.myKey ||
+  Date.now() - (app.seen[k] || app.joinedAt) < net.TIMEOUT;
 
-function hostSync() {
-  app.online = app.conn ? app.conn.online() : new Set();
-  app.online.add(app.myKey);
-  store.set('carc-host', { code: app.code, lobby: app.lobby, state: app.state });
-  app.conn && app.conn.broadcast({ type: 'sync', lobby: app.lobby, opts: app.opts, state: app.state, online: [...app.online] });
-  if (app.state && app.mode !== 'game') { show('game'); fitView(); }
-  update();
-}
-
-function startGuest(code) {
-  app.kind = 'guest';
+function startOnline(code, creating) {
+  app.kind = 'online';
   app.code = code;
-  app.state = null;
-  app.lobby = [];
-  app.finalShown = false;
+  app.joinedAt = Date.now();
+  const saved = store.get('carc-room-' + code);
+  app.state = saved ? saved.state : null;
+  app.lobby = saved ? saved.lobby : null;
+  if (creating) app.lobby = { owner: app.myKey, players: [{ name: myName(), key: app.myKey }], opts: app.opts, started: false };
+  app.chat = store.get('carc-chat-' + code) || [];
+  app.finalShown = !!(app.state && app.state.phase === 'end');
+  store.set('carc-last-room', code);
   history.replaceState(null, '', '?room=' + code);
-  show('lobby');
-  app.conn = net.join(code, app.myKey, myName(), {
+  lobbyMsg(creating ? 'Создаю комнату…' : 'Подключение…');
+  app.conn = net.room(code, app.myKey, myName(), {
     onStatus: t => { lobbyMsg(t); gameMsg(t); },
-    onLive,
-    onMessage: msg => {
-      if (msg.type === 'sync') {
-        const prevSeq = app.state ? app.state.seq : -1;
-        app.lobby = msg.lobby;
-        if (msg.opts) app.opts = msg.opts;
-        app.state = msg.state;
-        app.online = new Set(msg.online);
-        if (app.state && app.mode !== 'game') { show('game'); fitView(); }
-        if (app.state && app.state.seq !== prevSeq) app.tent = null;
-        update();
-      } else if (msg.type === 'error') { gameMsg(msg.msg); lobbyMsg(msg.msg); }
+    onReady() {
+      if (app.lobby && app.lobby.owner === app.myKey) app.conn.lobby(app.lobby);
+      // Если на сервере нет состояния новее нашего — восстанавливаем его из своей копии.
+      setTimeout(() => {
+        if (app.state && newer(app.state, app.broker)) app.conn.state(app.state);
+        if (!app.lobby && !app.state) lobbyMsg('Комната не найдена. Проверьте код.');
+      }, 3000);
+    },
+    onLobby(l) {
+      app.lobby = l;
+      save();
+      update();
+    },
+    onState(s) {
+      if (!app.broker || newer(s, app.broker)) app.broker = s;
+      if (newer(s, app.state)) setState(s);
+      else if (newer(app.state, s)) app.conn.state(app.state);
+    },
+    onPing(k, name) {
+      const was = isOnline(k);
+      // Новичку сразу отвечаем, чтобы он увидел нас в сети.
+      if (!app.seen[k]) app.conn.ping();
+      app.seen[k] = Date.now();
+      // Создатель комнаты добавляет новичков в лобби.
+      const l = app.lobby;
+      if (l && l.owner === app.myKey && !l.started && !app.state && !l.players.some(p => p.key === k)) {
+        // Тот же человек с другого устройства занимает своё место, иначе — новый игрок.
+        const same = l.players.find(p => p.name === name && p.key !== app.myKey && !isOnline(p.key));
+        if (same) same.key = k;
+        else if (l.players.length < 6) l.players.push({ name, key: k });
+        app.conn.lobby(l);
+      }
+      if (!was) update();
+    },
+    onChat: addChat,
+    onLive(msg) {
+      app.ghost = msg;
+      drawPreview();
+      draw();
     },
   });
+  show(app.state ? 'game' : 'lobby');
+  renderChat();
   update();
 }
 
-// ---------- Живой показ хода соперника ----------
-function onLive(msg) {
-  if (msg.key === app.myKey) return;
-  app.ghost = msg;
-  drawPreview();
-  draw();
+function save() {
+  if (app.kind === 'local') store.set('carc-local', app.state);
+  else if (app.kind === 'online') store.set('carc-room-' + app.code, { state: app.state, lobby: app.lobby });
 }
 
+// Новое состояние партии (своё или пришедшее по сети).
+function setState(s) {
+  const prev = app.state;
+  app.state = s;
+  if (!prev || prev.seq !== s.seq || prev.gid !== s.gid) {
+    app.tent = null;
+    app.hint = null;
+    if (prev && prev.gid === s.gid) startAnim(s.events);
+    if (prev && prev.gid !== s.gid) app.finalShown = false;
+  }
+  save();
+  if (app.mode !== 'game') show('game');
+  update();
+}
+
+// Применить действие к копии состояния и опубликовать результат.
+function commit(fn) {
+  const next = clone(app.state);
+  try { fn(next); } catch (e) { gameMsg(e.message); return; }
+  gameMsg('');
+  setState(next);
+  if (app.kind === 'online') app.conn.state(next);
+}
+
+function leave() {
+  if (app.conn) app.conn.destroy();
+  history.replaceState(null, '', location.pathname);
+  location.reload();
+}
+
+// ---------- Чат и реакции ----------
+const REACTS = ['👍', '😂', '😮', '😡', '😭', '🎉'];
+
+function sendChat(text, react = false) {
+  text = text.trim();
+  if (!text || app.kind !== 'online') return;
+  const m = { id: uid(), key: app.myKey, name: myName(), text: text.slice(0, 200), react, ts: Date.now() };
+  addChat(m);
+  app.conn.chat(m, app.chat.slice(-30));
+}
+
+function addChat(m) {
+  if (!m || !m.id || app.chat.some(c => c.id === m.id)) return;
+  app.chat.push(m);
+  app.chat.sort((a, b) => a.ts - b.ts);
+  app.chat = app.chat.slice(-100);
+  store.set('carc-chat-' + app.code, app.chat);
+  renderChat();
+  if (m.react) floatReaction(m);
+}
+
+const colorOf = k => {
+  const ps = (app.state && app.state.players) || (app.lobby && app.lobby.players) || [];
+  const i = ps.findIndex(p => p.key === k);
+  return i < 0 ? '#888' : ps[i].color || COLORS[i];
+};
+
+function renderChat() {
+  const list = $('#chat-list');
+  list.replaceChildren(...app.chat.slice(-50).map(m => {
+    const li = document.createElement('li');
+    li.innerHTML = `<b></b> <span></span>`;
+    li.querySelector('b').textContent = m.name + ':';
+    li.querySelector('b').style.color = colorOf(m.key);
+    li.querySelector('span').textContent = m.text;
+    if (m.react) li.classList.add('react');
+    return li;
+  }));
+  list.scrollTop = list.scrollHeight;
+}
+
+function floatReaction(m) {
+  if (Date.now() - m.ts > 15000) return;
+  const el = document.createElement('div');
+  el.className = 'react-float';
+  el.innerHTML = `<span></span><small></small>`;
+  el.querySelector('span').textContent = m.text;
+  el.querySelector('small').textContent = m.name;
+  el.querySelector('small').style.background = colorOf(m.key);
+  const r = cv.getBoundingClientRect();
+  el.style.left = (r.left + r.width * (0.2 + Math.random() * 0.6)) + 'px';
+  el.style.top = (r.top + r.height * 0.75) + 'px';
+  document.body.append(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+function initChat() {
+  $('#reacts').replaceChildren(...REACTS.map(e => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = e;
+    b.onclick = () => sendChat(e, true);
+    return b;
+  }));
+  $('#chat-form').onsubmit = ev => {
+    ev.preventDefault();
+    sendChat($('#chat-input').value);
+    $('#chat-input').value = '';
+  };
+}
+
+// ---------- Живой показ хода ----------
 let lastLive = '';
 function sendLive() {
-  if (app.kind === 'local' || !app.conn || !isMyTurn()) return;
-  const msg = { key: app.myKey, seq: app.state.seq, tent: app.tent, hover: app.tent ? null : app.hover, rot: app.rot };
+  if (app.kind !== 'online' || !app.conn || !canPlaceTile()) return;
+  const msg = { seq: app.state.seq, gid: app.state.gid, tent: app.tent, hover: app.tent ? null : app.hover, rot: app.rot };
   const str = JSON.stringify(msg);
   if (str === lastLive) return;
   lastLive = str;
   app.conn.live(msg);
 }
 
-const lobbyMsg = t => { $('#lobby-msg').textContent = t; };
-const gameMsg = t => { $('#game-msg').textContent = t; };
-
-function leave() {
-  if (app.conn) app.conn.destroy();
-  app.conn = null;
-  history.replaceState(null, '', location.pathname);
-  location.reload();
-}
-
 // ---------- Ход ----------
-const isMyTurn = () => app.state && app.state.phase === 'play' &&
-  (app.kind === 'local' || app.state.players[app.state.turn].key === app.myKey);
+const iAm = i => app.kind === 'local' || (app.state.players[i] && app.state.players[i].key === app.myKey);
+const canPlaceTile = () => app.state && app.state.phase === 'play' && !app.state.dragonMove && iAm(app.state.turn);
+const canMoveDragon = () => app.state && app.state.phase === 'play' && app.state.dragonMove && iAm(app.state.dragonMove.player);
+const actor = s => (s.dragonMove ? s.dragonMove.player : s.turn);
 
-let spotsCache = { seq: -1, list: [] };
-function validSpots() {
-  const s = app.state;
-  const id = s.seq + ':' + s.current;
-  if (spotsCache.seq !== id) spotsCache = { seq: id, list: placements(s.board, s.current) };
-  return spotsCache.list;
+const cache = new Map();
+function cached(name, id, fn) {
+  const c = cache.get(name);
+  if (c && c.id === id) return c.v;
+  const v = fn();
+  cache.set(name, { id, v });
+  return v;
 }
 
-const rotationsAt = (x, y) => [0, 1, 2, 3].filter(r => canPlace(app.state.board, app.state.current, r, x, y));
+const validSpots = () => cached('spots', app.state.gid + app.state.seq, () => placements(app.state.board, app.state.current, app.state.riverLast));
+const rotationsAt = (x, y) => [0, 1, 2, 3].filter(r => canPlace(app.state.board, app.state.current, r, x, y, app.state.riverLast));
 
 function tentBoard() {
   const b = { ...app.state.board };
@@ -248,77 +356,218 @@ function tentBoard() {
   b[key(t.x, t.y)] = { t: app.state.current, r: t.r, m: null };
   return b;
 }
+const tentId = () => app.state.gid + app.state.seq + JSON.stringify([app.tent.x, app.tent.y, app.tent.r]);
 
 // Какие фигуры можно поставить на каждый признак тайла-кандидата: { fi: [kinds] }.
 function tentKinds() {
   if (!app.tent) return {};
-  const b = tentBoard(), s = app.state, res = {};
-  features(s.current, app.tent.r).forEach((f, i) => {
-    const ks = figureKinds(s, b, app.tent.x, app.tent.y, i, s.turn);
-    if (ks.length) res[i] = ks;
+  return cached('kinds', tentId(), () => {
+    const b = tentBoard(), s = app.state, res = {};
+    features(s.current, app.tent.r).forEach((f, i) => {
+      const ks = figureKinds(s, b, app.tent.x, app.tent.y, i, s.turn);
+      if (ks.length) res[i] = ks;
+    });
+    return res;
   });
-  return res;
 }
-const tentOptions = () => Object.keys(tentKinds()).map(Number);
+const portalOpts = () => (app.tent && TILES[app.state.current].portal
+  ? cached('portal', tentId(), () => portalTargets(app.state, tentBoard(), key(app.tent.x, app.tent.y))) : []);
+const princessOpts = () => (app.tent ? cached('princess', tentId(), () => princessTargets(tentBoard(), app.tent.x, app.tent.y)) : []);
+const portalKinds = () => {
+  const p = app.state.players[app.state.turn];
+  return [p.meeples > 0 && 'meeple', p.big > 0 && 'big'].filter(Boolean);
+};
 
 function rotate() {
-  if (!isMyTurn()) return;
+  if (!canPlaceTile()) return;
   if (app.tent) {
     const rs = rotationsAt(app.tent.x, app.tent.y);
-    app.tent.r = rs[(rs.indexOf(app.tent.r) + 1) % rs.length];
-    app.tent.f = null;
-    app.tent.kind = null;
+    app.tent = { ...app.tent, r: rs[(rs.indexOf(app.tent.r) + 1) % rs.length], f: null, kind: null, at: null, princess: null };
     app.rot = app.tent.r;
   } else app.rot = (app.rot + 1) % 4;
   update();
 }
 
 function endTurn() {
-  if (!isMyTurn() || !app.tent) return;
+  if (!canPlaceTile() || !app.tent) return;
   const move = { ...app.tent };
-  gameMsg('');
-  if (app.kind === 'guest') {
-    app.conn.send({ type: 'move', move });
-    return;
-  }
-  try {
-    applyTurn(app.state, app.state.turn, move);
-    app.tent = null;
-    if (app.kind === 'host') hostSync();
-    else { store.set('carc-local', app.state); update(); }
-  } catch (e) { gameMsg(e.message); }
+  commit(s => applyTurn(s, s.turn, move));
+}
+
+// Перебор фигур по повторным нажатиям: фишка → большая → строитель → свинья → ничего.
+function cycle(kinds, f, at) {
+  const t = app.tent;
+  t.princess = null;
+  if (t.f !== f || (t.at || null) !== (at || null)) { t.f = f; t.at = at; t.kind = kinds[0]; return; }
+  const next = kinds[kinds.indexOf(t.kind) + 1];
+  if (next) t.kind = next;
+  else { t.f = null; t.at = null; t.kind = null; }
 }
 
 function clickCell(wx, wy) {
-  if (!isMyTurn()) return;
-  const gx = Math.floor(wx), gy = Math.floor(wy);
+  const s = app.state;
+  if (!s) return;
+  const gx = Math.floor(wx), gy = Math.floor(wy), k = key(gx, gy);
   const fx = wx - gx, fy = wy - gy;
-  if (app.tent && app.tent.x === gx && app.tent.y === gy) {
-    const fs = features(app.state.current, app.tent.r);
-    let best = null, bd = 0.16;
-    for (const i of tentOptions()) {
-      const d = Math.hypot(fs[i].p[0] - fx, fs[i].p[1] - fy);
-      if (d < bd) { bd = d; best = i; }
-    }
-    if (best != null) {
-      // Повторные нажатия перебирают фигуры: фишка → большая → строитель → ничего.
-      const ks = tentKinds()[best];
-      if (app.tent.f !== best) { app.tent.f = best; app.tent.kind = ks[0]; }
-      else {
-        const next = ks[ks.indexOf(app.tent.kind) + 1];
-        if (next) app.tent.kind = next;
-        else { app.tent.f = null; app.tent.kind = null; }
+  const hitR = Math.max(0.17, 24 / S());
+
+  if (canMoveDragon()) {
+    if (dragonOptions(s).includes(k)) { commit(n => applyDragon(n, n.dragonMove.player, k)); return; }
+  } else if (canPlaceTile()) {
+    const t = app.tent;
+    if (t) {
+      // Портал и принцесса — нажатие на чужие тайлы.
+      for (const p of portalOpts()) {
+        const tile = s.board[p.k];
+        const pt = features(tile.t, tile.r)[p.f].p;
+        const [px, py] = unkey(p.k);
+        if (Math.hypot(px + pt[0] - wx, py + pt[1] - wy) < hitR) { cycle(portalKinds(), p.f, p.k); update(); return; }
       }
-    } else rotate();
-    update();
-    return;
+      for (const p of princessOpts()) {
+        const tile = s.board[p.k];
+        const pt = features(tile.t, tile.r)[p.f].p;
+        const [px, py] = unkey(p.k);
+        if (Math.hypot(px + pt[0] - wx, py + pt[1] - wy) < hitR) {
+          const same = t.princess && t.princess.k === p.k && t.princess.f === p.f;
+          Object.assign(t, { princess: same ? null : p, f: null, kind: null, at: null });
+          update();
+          return;
+        }
+      }
+    }
+    if (t && t.x === gx && t.y === gy) {
+      const fs = features(s.current, t.r);
+      const kinds = tentKinds();
+      let best = null, bd = hitR;
+      for (const i of Object.keys(kinds).map(Number)) {
+        const d = Math.hypot(fs[i].p[0] - fx, fs[i].p[1] - fy);
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best != null) cycle(kinds[best], best, null);
+      else rotate();
+      update();
+      return;
+    }
+    const rs = rotationsAt(gx, gy);
+    if (rs.length) {
+      app.tent = { x: gx, y: gy, r: rs.includes(app.rot) ? app.rot : rs[0], f: null, kind: null, at: null, princess: null };
+      app.rot = app.tent.r;
+      app.hint = null;
+      update();
+      return;
+    }
   }
-  const rs = rotationsAt(gx, gy);
-  if (rs.length) {
-    app.tent = { x: gx, y: gy, r: rs.includes(app.rot) ? app.rot : rs[0], f: null, kind: null };
-    app.rot = app.tent.r;
-  } else app.tent = null;
-  update();
+  // Нажатие на выложенный тайл — подсказка очков.
+  const h = hintAt(wx, wy);
+  app.hint = h && !(app.hint && app.hint.sticky && app.hint.id === h.id) ? { ...h, sticky: true } : null;
+  if (app.hint) { const [sx, sy] = toScreen(wx, wy); app.hint.sx = sx; app.hint.sy = sy; }
+  showTip();
+  draw();
+}
+
+// ---------- Подсказка очков ----------
+// prev — прошлая подсказка: если курсор на том же объекте, не пересчитываем его.
+function hintAt(wx, wy, prev = null) {
+  const s = app.state;
+  const gx = Math.floor(wx), gy = Math.floor(wy), k = key(gx, gy);
+  const tile = s.board[k];
+  if (!tile) return null;
+  const f = hitFeature(tile.t, tile.r, wx - gx, wy - gy);
+  if (f < 0 || features(tile.t, tile.r)[f].t === 'river') return null;
+  if (prev && prev.k === k && prev.f === f) return prev;
+  const d = describe(s, gx, gy, f);
+  return { id: d.id, k, f, d };
+}
+
+function hintHtml(d) {
+  const s = app.state;
+  const cnt = {};
+  for (const m of d.meeples) cnt[m.p] = (cnt[m.p] || 0) + (m.big ? 2 : 1);
+  const figs = Object.entries(cnt).map(([p, c]) => `<b style="color:${s.players[p].color}">${esc(s.players[p].name)}</b> ${c}`).join(', ');
+  const lead = d.leaders.map(i => `<b style="color:${s.players[i].color}">${esc(s.players[i].name)}</b>`).join(', ');
+  let title = '', info = '', pts = '';
+  if (d.t === 'city') {
+    title = '🏰 Город' + (d.cathedral ? ' с собором' : '');
+    info = `${d.tiles} тайл. · щитов: ${d.shields}`;
+  } else if (d.t === 'road') {
+    title = '🛤️ Дорога' + (d.inn ? ' с трактиром' : '');
+    info = `${d.tiles} тайл.`;
+  } else if (d.t === 'monastery') {
+    title = '⛪ Монастырь';
+    info = `вокруг ${d.tiles} из 9 тайлов`;
+  } else {
+    title = '🌾 Поле';
+    info = `рядом завершённых городов: ${d.cities}`;
+  }
+  if (d.t === 'field') pts = `В конце игры: <b>${d.now}</b> очк.`;
+  else if (!d.open) pts = 'Завершён ✓';
+  else pts = `Сейчас (если не достроят): <b>${d.now}</b> · Завершённый: <b>${d.done}</b>`;
+  return `<div class="tip-t">${title}</div><div>${info}</div><div>${pts}</div>` +
+    (figs ? `<div>Фигуры: ${figs}</div><div>Лидер: ${lead}</div>` : '<div class="muted">Никем не занят</div>');
+}
+
+function showTip() {
+  const tip = $('#tip');
+  const h = app.hint;
+  if (!h || !app.state) { tip.classList.add('hidden'); return; }
+  tip.innerHTML = hintHtml(h.d);
+  tip.classList.remove('hidden');
+  const r = cv.getBoundingClientRect();
+  const x = Math.min(r.left + h.sx + 14, r.right - tip.offsetWidth - 8);
+  const y = h.sy + 14 + tip.offsetHeight > r.height ? r.top + h.sy - tip.offsetHeight - 10 : r.top + h.sy + 14;
+  tip.style.left = Math.max(8, x) + 'px';
+  tip.style.top = Math.max(8, y) + 'px';
+}
+
+// ---------- Анимация очков ----------
+const ANIM_MS = 2200;
+function startAnim(events) {
+  if (!events || !events.length) return;
+  app.anim = { events, t0: performance.now() };
+  const loop = () => {
+    if (!app.anim) return;
+    draw();
+    if (performance.now() - app.anim.t0 < ANIM_MS) requestAnimationFrame(loop);
+    else { app.anim = null; draw(); }
+  };
+  requestAnimationFrame(loop);
+}
+
+function drawAnim(sz) {
+  const a = app.anim;
+  if (!a) return;
+  const p = Math.min(1, (performance.now() - a.t0) / ANIM_MS);
+  const s = app.state;
+  for (const ev of a.events) {
+    const dragon = ev.t === 'dragon';
+    ctx.save();
+    ctx.globalAlpha = 1 - p;
+    ctx.fillStyle = dragon ? '#ff3b1f55' : '#ffe06655';
+    ctx.strokeStyle = dragon ? '#ff3b1f' : '#ffd84a';
+    ctx.lineWidth = 4;
+    let cx = 0, cy = 0;
+    for (const k of ev.tiles) {
+      const [x, y] = unkey(k);
+      const [px, py] = toScreen(x, y);
+      ctx.fillRect(px, py, sz, sz);
+      ctx.strokeRect(px + 2, py + 2, sz - 4, sz - 4);
+      cx += px + sz / 2; cy += py + sz / 2;
+    }
+    cx /= ev.tiles.length; cy /= ev.tiles.length;
+    if (ev.pts > 0 && ev.players.length) {
+      ctx.globalAlpha = p < 0.8 ? 1 : (1 - p) * 5;
+      ctx.font = `bold ${Math.max(18, sz * 0.4)}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ev.players.forEach((pi, j) => {
+        const ty = cy - p * sz * 0.9 + j * sz * 0.4;
+        ctx.lineWidth = 5; ctx.strokeStyle = '#fff';
+        ctx.strokeText('+' + ev.pts, cx, ty);
+        ctx.fillStyle = s.players[pi].color;
+        ctx.fillText('+' + ev.pts, cx, ty);
+      });
+    }
+    ctx.restore();
+  }
 }
 
 // ---------- Отрисовка ----------
@@ -334,7 +583,15 @@ function resize() {
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
   draw();
 }
-window.addEventListener('resize', resize);
+
+// На телефоне поле занимает место над панелью.
+function layout() {
+  const mobile = innerWidth <= 720;
+  $('#game').style.setProperty('--panel-h', mobile ? $('#panel').offsetHeight + 'px' : '0px');
+  resize();
+}
+window.addEventListener('resize', layout);
+new ResizeObserver(() => { if (app.mode === 'game') layout(); }).observe($('#panel'));
 
 const S = () => BASE * app.view.z;
 const toScreen = (wx, wy) => [W / 2 + (wx - app.view.x) * S(), H / 2 + (wy - app.view.y) * S()];
@@ -346,19 +603,39 @@ function fitView() {
   const xs = ks.map(k => k[0]), ys = ks.map(k => k[1]);
   const x0 = Math.min(...xs) - 1, x1 = Math.max(...xs) + 2, y0 = Math.min(...ys) - 1, y1 = Math.max(...ys) + 2;
   requestAnimationFrame(() => {
-    resize();
+    layout();
     app.view.x = (x0 + x1) / 2; app.view.y = (y0 + y1) / 2;
     app.view.z = Math.max(0.25, Math.min(1.4, W / BASE / (x1 - x0), H / BASE / (y1 - y0)));
     draw();
   });
 }
 
+function figureAt(ctx2, s, k, f, kind, color, sz, dx = 0, dy = 0) {
+  const tile = s.board[k];
+  const ft = features(tile.t, tile.r)[f];
+  const [x, y] = unkey(k);
+  const [px, py] = toScreen(x + ft.p[0] + dx, y + ft.p[1] + dy);
+  drawFigure(ctx2, kind, px, py, sz * 0.26, color, ft.t === 'field' && kind !== 'pig');
+}
+
+function circle(x, y, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+}
+
 function draw() {
   if (!app.state || !W) return;
   const s = app.state, sz = S();
+  const css = getComputedStyle(document.documentElement);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = '#2b3a2a';
+  ctx.fillStyle = css.getPropertyValue('--board').trim() || '#2b3a2a';
   ctx.fillRect(0, 0, W, H);
+  const circleR = Math.max(isTouch ? 11 : 7, sz * 0.075);
 
   for (const [k, t] of Object.entries(s.board)) {
     const [x, y] = unkey(k);
@@ -376,8 +653,20 @@ function draw() {
     ctx.strokeRect(px + 1.5, py + 1.5, sz - 3, sz - 3);
     ctx.setLineDash([]);
   }
+  // Подсветка объекта из подсказки.
+  if (app.hint) {
+    ctx.fillStyle = '#ffffff30';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    for (const k of new Set(app.hint.d.members.map(m => m.k))) {
+      const [x, y] = unkey(k);
+      const [px, py] = toScreen(x, y);
+      ctx.fillRect(px, py, sz, sz);
+      ctx.strokeRect(px + 1, py + 1, sz - 2, sz - 2);
+    }
+  }
   // Доступные места.
-  if (isMyTurn()) {
+  if (canPlaceTile()) {
     const seen = new Set();
     for (const p of validSpots()) {
       const k = key(p.x, p.y);
@@ -391,24 +680,53 @@ function draw() {
       ctx.strokeRect(px + 3, py + 3, sz - 6, sz - 6);
     }
   }
-  // Фишки и строители.
+  // Фигуры.
+  const tentPr = app.tent && canPlaceTile() && app.tent.princess;
   for (const [k, t] of Object.entries(s.board)) {
-    const [x, y] = unkey(k);
-    const fs = features(t.t, t.r);
     if (t.m) {
-      const f = fs[t.m.f];
-      const [px, py] = toScreen(x + f.p[0], y + f.p[1]);
-      drawFigure(ctx, t.m.big ? 'big' : 'meeple', px, py, sz * 0.26, s.players[t.m.p].color, f.t === 'field');
+      figureAt(ctx, s, k, t.m.f, t.m.big ? 'big' : 'meeple', s.players[t.m.p].color, sz);
+      if (tentPr && tentPr.k === k) {
+        const ft = features(t.t, t.r)[t.m.f];
+        const [x, y] = unkey(k);
+        const [px, py] = toScreen(x + ft.p[0], y + ft.p[1]);
+        ctx.save();
+        ctx.strokeStyle = '#ff2d6f'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+        const r = sz * 0.13;
+        ctx.beginPath(); ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r); ctx.moveTo(px + r, py - r); ctx.lineTo(px - r, py + r); ctx.stroke();
+        ctx.restore();
+      }
     }
-    if (t.b) {
-      const f = fs[t.b.f];
-      const [px, py] = toScreen(x + f.p[0] + 0.16, y + f.p[1] + 0.05);
-      drawFigure(ctx, 'builder', px, py, sz * 0.26, s.players[t.b.p].color);
+    if (t.b) figureAt(ctx, s, k, t.b.f, 'builder', s.players[t.b.p].color, sz, 0.16, 0.05);
+    if (t.pg) figureAt(ctx, s, k, t.pg.f, 'pig', s.players[t.pg.p].color, sz, -0.16, 0.05);
+  }
+  // Дракон и куда он может полететь.
+  if (s.dragon) {
+    const [x, y] = unkey(s.dragon);
+    const [px, py] = toScreen(x + 0.5, y + 0.5);
+    if (s.dragonMove) {
+      for (const k of s.dragonMove.visited) {
+        const [vx, vy] = unkey(k);
+        const [qx, qy] = toScreen(vx, vy);
+        ctx.fillStyle = '#ff3b1f22';
+        ctx.fillRect(qx, qy, sz, sz);
+      }
+      if (canMoveDragon()) {
+        for (const k of dragonOptions(s)) {
+          const [ox, oy] = unkey(k);
+          const [qx, qy] = toScreen(ox, oy);
+          ctx.strokeStyle = '#ff3b1f';
+          ctx.lineWidth = 4;
+          ctx.setLineDash([8, 5]);
+          ctx.strokeRect(qx + 3, qy + 3, sz - 6, sz - 6);
+          ctx.setLineDash([]);
+        }
+      }
     }
+    drawDragon(ctx, px, py, sz);
   }
   // Что сейчас делает соперник.
   const g = app.ghost;
-  if (g && !isMyTurn() && s.phase === 'play' && g.seq === s.seq && g.key === s.players[s.turn].key) {
+  if (g && !canPlaceTile() && s.phase === 'play' && !s.dragonMove && g.seq === s.seq && g.gid === s.gid && g.key === s.players[s.turn].key) {
     const color = s.players[s.turn].color;
     if (g.tent) {
       const [px, py] = toScreen(g.tent.x, g.tent.y);
@@ -421,9 +739,8 @@ function draw() {
       ctx.strokeRect(px, py, sz, sz);
       ctx.setLineDash([]);
       if (g.tent.f != null) {
-        const f = features(s.current, g.tent.r)[g.tent.f];
-        const [mx, my] = toScreen(g.tent.x + f.p[0], g.tent.y + f.p[1]);
-        drawFigure(ctx, g.tent.kind || 'meeple', mx, my, sz * 0.26, color, f.t === 'field');
+        const ghostBoard = { ...s, board: { ...s.board, [key(g.tent.x, g.tent.y)]: { t: s.current, r: g.tent.r } } };
+        figureAt(ctx, ghostBoard, g.tent.at || key(g.tent.x, g.tent.y), g.tent.f, g.tent.kind || 'meeple', color, sz);
       }
     } else if (g.hover) {
       const [px, py] = toScreen(g.hover.x, g.hover.y);
@@ -433,7 +750,7 @@ function draw() {
     }
   }
   // Предварительно положенный тайл.
-  if (app.tent && isMyTurn()) {
+  if (app.tent && canPlaceTile()) {
     const t = app.tent;
     const [px, py] = toScreen(t.x, t.y);
     drawTile(ctx, s.current, t.r, px, py, sz);
@@ -442,22 +759,36 @@ function draw() {
     ctx.strokeRect(px, py, sz, sz);
     const fs = features(s.current, t.r);
     const color = s.players[s.turn].color;
-    for (const i of tentOptions()) {
+    for (const i of Object.keys(tentKinds()).map(Number)) {
+      if (t.f === i && !t.at) continue;
       const [mx, my] = toScreen(t.x + fs[i].p[0], t.y + fs[i].p[1]);
-      if (t.f === i) continue;
+      circle(mx, my, circleR, '#ffffffaa', color);
+    }
+    for (const p of portalOpts()) {
+      if (t.at === p.k && t.f === p.f) continue;
+      const tile = s.board[p.k];
+      const pt = features(tile.t, tile.r)[p.f].p;
+      const [x, y] = unkey(p.k);
+      const [mx, my] = toScreen(x + pt[0], y + pt[1]);
+      circle(mx, my, circleR * 0.85, '#d6b3ffcc', '#7a3fd0');
+    }
+    for (const p of princessOpts()) {
+      const tile = s.board[p.k];
+      const pt = features(tile.t, tile.r)[p.f].p;
+      const [x, y] = unkey(p.k);
+      const [mx, my] = toScreen(x + pt[0], y + pt[1]);
       ctx.beginPath();
-      ctx.arc(mx, my, Math.max(6, sz * 0.07), 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffffaa';
-      ctx.fill();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
+      ctx.arc(mx, my, sz * 0.17, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff2d6f';
+      ctx.lineWidth = 3;
       ctx.stroke();
     }
     if (t.f != null) {
-      const [mx, my] = toScreen(t.x + fs[t.f].p[0], t.y + fs[t.f].p[1]);
-      drawFigure(ctx, t.kind || 'meeple', mx, my, sz * 0.26, color, fs[t.f].t === 'field');
+      const b = { ...s, board: tentBoard() };
+      figureAt(ctx, b, t.at || key(t.x, t.y), t.f, t.kind || 'meeple', color, sz);
     }
   }
+  drawAnim(sz);
 }
 
 const pctx = $('#preview').getContext('2d');
@@ -467,7 +798,7 @@ function drawPreview() {
   if (!s || !s.current) return;
   const g = app.ghost;
   let r = app.tent ? app.tent.r : app.rot;
-  if (!isMyTurn() && g && g.seq === s.seq) r = g.tent ? g.tent.r : (g.rot || 0);
+  if (!canPlaceTile() && g && g.seq === s.seq) r = g.tent ? g.tent.r : (g.rot || 0);
   drawTile(pctx, s.current, r, 0, 0, 200);
 }
 
@@ -476,50 +807,91 @@ function figuresText(p, s) {
   const o = s.opts || {};
   let t = `<span title="Фишки">♟${p.meeples}</span>`;
   if (o.inns) t += ` <span title="Большая фишка">♜${p.big}</span>`;
-  if (o.traders) t += ` <span title="Строитель">🔨${p.builder}</span>` +
+  if (o.traders) t += ` <span title="Строитель">🔨${p.builder}</span> <span title="Свинья">🐷${p.pig}</span>` +
     ` <span title="Вино, зерно, ткань">🍷${p.goods.wine} 🌾${p.goods.grain} 🧵${p.goods.cloth}</span>`;
   return t;
 }
 
 function playerRow(p, i, s) {
   const li = document.createElement('li');
-  if (s && s.phase === 'play' && s.turn === i) li.classList.add('turn');
-  const online = app.kind === 'local' || app.online.has(p.key);
+  if (s && s.phase === 'play' && actor(s) === i) li.classList.add('turn');
   li.innerHTML = `<span class="dot"></span><span class="nm"></span>` +
     (s ? `<span class="mp">${figuresText(p, s)}</span><span class="score">${p.score}</span>` : '');
   li.querySelector('.dot').style.background = p.color || COLORS[i];
-  li.querySelector('.nm').textContent = p.name + (p.key === app.myKey && app.kind !== 'local' ? ' (вы)' : '');
-  if (!online) li.querySelector('.nm').classList.add('off');
+  li.querySelector('.nm').textContent = p.name + (p.key === app.myKey && app.kind !== 'local' ? ' (вы)' : '') +
+    (app.lobby && p.key === app.lobby.owner && !s ? ' 👑' : '');
+  if (!isOnline(p.key)) { li.querySelector('.nm').classList.add('off'); li.title = 'Не в сети'; }
+  // Создатель комнаты может убрать игрока из лобби.
+  if (!s && app.lobby && app.lobby.owner === app.myKey && p.key !== app.myKey) {
+    const x = document.createElement('button');
+    x.className = 'icon kick';
+    x.title = 'Убрать из комнаты';
+    x.textContent = '✕';
+    x.onclick = () => {
+      app.lobby.players = app.lobby.players.filter(q => q.key !== p.key);
+      app.conn.lobby(app.lobby);
+      update();
+    };
+    li.append(x);
+  }
   return li;
+}
+
+function hintText(s) {
+  if (canMoveDragon()) return `🐉 Ведите дракона: нажмите на тайл с красной рамкой. Осталось ходов: ${s.dragonMove.left}. Он съест все фигуры на своём пути.`;
+  if (!canPlaceTile()) return '';
+  if (!app.tent) return isTouch
+    ? 'Нажмите на подсвеченную клетку, чтобы положить тайл. Нажатие на выложенный тайл покажет, сколько стоит объект.'
+    : 'Нажмите на подсвеченную клетку, чтобы положить тайл. Наведите курсор на поле — увидите, сколько стоит объект.';
+  const o = s.opts || {};
+  const parts = ['Нажмите на тайл, чтобы повернуть. Кружки — куда можно поставить фигуру'];
+  if (o.inns || o.traders) parts.push('повторное нажатие меняет фигуру (обычная → большая → строитель → свинья)');
+  if (portalOpts().length) parts.push('🌀 фиолетовые кружки — через портал в любое место');
+  if (princessOpts().length) parts.push('👸 розовые кольца — выгнать рыцаря принцессой');
+  return parts.join('; ') + '. Затем «Завершить ход».';
 }
 
 function update() {
   // Лобби.
-  if (app.kind === 'host' || app.kind === 'guest') {
+  if (app.kind === 'online') {
+    const l = app.lobby;
     $('#lobby-code').textContent = app.code;
     $('#invite').value = location.origin + location.pathname + '?room=' + app.code;
-    $('#lobby-players').replaceChildren(...app.lobby.map((p, i) => playerRow(p, i, null)));
-    $('#btn-start').classList.toggle('hidden', app.kind !== 'host');
-    $('#btn-start').disabled = app.lobby.length < 2;
-    renderModes($('#lobby-modes'), app.kind === 'host' && !app.state);
-    $('#btn-start').textContent = app.lobby.length < 2 ? 'Ждём хотя бы ещё одного игрока…' : `Начать игру (${app.lobby.length} игр.)`;
+    $('#lobby-players').replaceChildren(...(l ? l.players : []).map((p, i) => playerRow(p, i, null)));
+    const owner = l && l.owner === app.myKey;
+    const ownerAway = l && !isOnline(l.owner);
+    renderModes($('#lobby-modes'), owner && !app.state, (l && l.opts) || {}, o => {
+      app.lobby.opts = o;
+      app.conn.lobby(app.lobby);
+      update();
+    });
+    const btn = $('#btn-start');
+    btn.classList.toggle('hidden', !l || !(owner || ownerAway));
+    btn.disabled = !l || l.players.length < 2;
+    btn.textContent = !l || l.players.length < 2 ? 'Ждём хотя бы ещё одного игрока…' : `Начать игру (${l.players.length} игр.)`;
+    $('#lobby-wait').textContent = l && !owner && !ownerAway ? 'Ждём, когда создатель комнаты начнёт игру…' : '';
   }
   const s = app.state;
   if (!s) return;
   $('#room-info').innerHTML = app.kind === 'local' ? 'Игра на одном устройстве' : `Комната <b class="code">${app.code}</b>`;
   $('#modes-info').textContent = modesText(s.opts);
   $('#players').replaceChildren(...s.players.map((p, i) => playerRow(p, i, s)));
-  const cur = s.players[s.turn];
-  const mine = isMyTurn();
+  const cur = s.players[actor(s)];
+  const mine = canPlaceTile() || canMoveDragon();
+  const who = app.kind === 'local' ? cur.name : mine ? 'Вы' : cur.name;
   $('#turn-info').textContent = s.phase === 'end' ? 'Игра окончена' :
-    (mine ? (app.kind === 'local' ? `Ходит ${cur.name}` : 'Ваш ход!') : `Ходит ${cur.name}`) + (s.bonus ? ' (доп. ход 🔨)' : '');
+    s.dragonMove ? `🐉 ${who === 'Вы' ? 'Вы ведёте' : who + ' ведёт'} дракона (${s.dragonMove.left})` :
+      (app.kind === 'local' ? `Ходит ${cur.name}` : mine ? 'Ваш ход!' : `Ходит ${cur.name}`) + (s.bonus ? ' (доп. ход 🔨)' : '');
   $('#deck-info').textContent = `Осталось тайлов: ${s.deck.length + (s.current ? 1 : 0)}`;
-  $('#btn-rotate').disabled = !mine;
-  $('#btn-end').disabled = !mine || !app.tent;
-  $('#hint').textContent = !mine ? '' : !app.tent
-    ? 'Нажмите на подсвеченную клетку, чтобы положить тайл.'
-    : 'Нажмите на тайл, чтобы повернуть. Кружки — куда можно поставить фигуру; повторное нажатие на кружок меняет фигуру' +
-      ((s.opts || {}).inns || (s.opts || {}).traders ? ' (обычная → большая → строитель → убрать)' : '') + '. Затем «Завершить ход».';
+  $('#btn-rotate').disabled = !canPlaceTile();
+  $('#btn-end').disabled = !canPlaceTile() || !app.tent;
+  $('#hint').textContent = hintText(s);
+  // Пропуск хода игрока, который вышел.
+  const away = app.kind === 'online' && s.phase === 'play' && !iAm(actor(s)) && !isOnline(cur.key) &&
+    s.players.some(p => p.key === app.myKey);
+  $('#btn-skip').classList.toggle('hidden', !away);
+  $('#btn-skip').textContent = `⏭ ${cur.name} не в сети — пропустить ход`;
+  $('#chat').classList.toggle('hidden', app.kind !== 'online');
   $('#log').replaceChildren(...s.log.slice(-40).reverse().map(t => {
     const li = document.createElement('li'); li.textContent = t; return li;
   }));
@@ -531,13 +903,29 @@ function update() {
     app.finalShown = true;
     const ranked = s.players.map((p, i) => [p, i]).sort((a, b) => b[0].score - a[0].score);
     $('#final-list').replaceChildren(...ranked.map(([p, i]) => playerRow(p, i, s)));
-    $('#btn-again').classList.toggle('hidden', app.kind === 'guest');
     $('#final').classList.remove('hidden');
   }
   if (s.phase !== 'end') $('#final').classList.add('hidden');
   drawPreview();
   draw();
+  showTip();
   sendLive();
+}
+setInterval(() => { if (app.kind === 'online') { claimSeat(); update(); } }, 5000);
+
+// Зашли с другого устройства или очистили браузер: занимаем место игрока с тем же именем,
+// если он давно не в сети.
+function claimSeat() {
+  const s = app.state;
+  if (!s || s.phase !== 'play' || s.players.some(p => p.key === app.myKey)) return;
+  const i = s.players.findIndex(p => p.name === myName() && !isOnline(p.key));
+  if (i < 0) return;
+  commit(n => {
+    n.players[i].key = app.myKey;
+    n.log.push(`${n.players[i].name} вернулся в игру`);
+    n.events = [];
+    n.seq++;
+  });
 }
 
 // ---------- Ввод ----------
@@ -555,11 +943,19 @@ cv.addEventListener('pointerdown', e => {
 });
 cv.addEventListener('pointermove', e => {
   if (!pointers.has(e.pointerId)) {
-    if (e.pointerType === 'mouse' && app.state && isMyTurn()) {
-      const [wx, wy] = toWorld(e.offsetX, e.offsetY);
+    if (e.pointerType !== 'mouse' || !app.state) return;
+    const [wx, wy] = toWorld(e.offsetX, e.offsetY);
+    if (canPlaceTile()) {
       const h = { x: Math.floor(wx), y: Math.floor(wy) };
       if (!app.hover || h.x !== app.hover.x || h.y !== app.hover.y) { app.hover = h; sendLive(); }
     }
+    // Подсказка при наведении.
+    if (app.hint && app.hint.sticky) return;
+    const h = hintAt(wx, wy, app.hint);
+    const changed = (h && h.id) !== (app.hint && app.hint.id);
+    app.hint = h ? { ...h, sx: e.offsetX, sy: e.offsetY } : null;
+    showTip();
+    if (changed) draw();
     return;
   }
   pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
@@ -573,10 +969,12 @@ cv.addEventListener('pointermove', e => {
     if (drag.moved) {
       app.view.x = drag.vx - dx / S();
       app.view.y = drag.vy - dy / S();
+      if (app.hint) { app.hint = null; showTip(); }
       draw();
     }
   }
 });
+cv.addEventListener('pointerleave', () => { if (app.hint && !app.hint.sticky) { app.hint = null; showTip(); draw(); } });
 const endPointer = e => {
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
@@ -604,11 +1002,14 @@ window.addEventListener('keydown', e => {
   if (app.mode !== 'game' || e.target.tagName === 'INPUT') return;
   if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') rotate();
   else if (e.key === 'Enter') endTurn();
-  else if (e.key === 'Escape') { app.tent = null; update(); }
+  else if (e.key === 'Escape') { app.tent = null; app.hint = null; update(); }
 });
 
 $('#btn-rotate').onclick = rotate;
 $('#btn-end').onclick = endTurn;
+$('#btn-skip').onclick = () => {
+  if (confirm('Пропустить ход игрока, который не в сети? Тайл достанется следующему.')) commit(s => skipTurn(s));
+};
 $('#btn-menu').onclick = () => { if (confirm('Выйти в меню? Игру можно будет продолжить.')) leave(); };
 $('#btn-leave').onclick = leave;
 $('#btn-copy').onclick = () => {
@@ -617,27 +1018,27 @@ $('#btn-copy').onclick = () => {
   $('#btn-copy').textContent = 'Скопировано!';
 };
 $('#btn-start').onclick = () => {
-  if (app.kind !== 'host' || app.lobby.length < 2) return;
-  app.state = newGame(app.lobby, app.opts);
-  hostSync();
-  fitView();
+  const l = app.lobby;
+  if (!l || l.players.length < 2) return;
+  l.started = true;
+  app.conn.lobby(l);
+  const s = newGame(l.players, l.opts || {});
+  setState(s);
+  app.conn.state(s);
 };
 $('#btn-again').onclick = () => {
-  const players = app.state.players.map(p => ({ name: p.name, key: p.key }));
-  app.state = newGame(players, app.state.opts || {});
+  const s = app.state;
+  const next = newGame(s.players.map(p => ({ name: p.name, key: p.key })), s.opts || {});
   app.finalShown = false;
-  app.tent = null;
-  if (app.kind === 'host') hostSync();
-  else { store.set('carc-local', app.state); update(); }
+  setState(next);
+  if (app.kind === 'online') app.conn.state(next);
   fitView();
 };
 $('#btn-close-final').onclick = () => $('#final').classList.add('hidden');
+$('#panel-toggle').onclick = () => { $('#panel').classList.toggle('collapsed'); };
 
+applyTheme(theme);
 initMenu();
-if (new URLSearchParams(location.search).get('room')) {
-  const h = store.get('carc-host');
-  const room = new URLSearchParams(location.search).get('room').toUpperCase();
-  // Хост, обновивший страницу, сразу возвращается в свою комнату.
-  if (h && h.code === room) startHost(h);
-  else if (store.get('carc-name')) startGuest(room);
-}
+initChat();
+const room = new URLSearchParams(location.search).get('room');
+if (room && store.get('carc-name')) startOnline(room.toUpperCase(), false);

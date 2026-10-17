@@ -89,6 +89,25 @@ Object.assign(TILES, {
   t11: variant('C', 1, 'traders', 0, { goods: 'cloth', shield: false, mp: [0.3, 0.3] }),
 });
 
+// Принцесса и дракон: вулканы, тайлы с драконом, порталы и принцессы.
+const tileVariant = (base, n, set, flags) => ({ ...TILES[base], n, set, ...flags });
+Object.assign(TILES, {
+  v1: { n: 2, set: 'dragon', volcano: true, f: [field(ALL, [0.18, 0.2])] },
+  v2: { n: 1, set: 'dragon', volcano: true, f: [city([0], [0.5, 0.13]), field([2, 3, 4, 5, 6, 7], [0.2, 0.8], [0])] },
+  v3: { n: 1, set: 'dragon', volcano: true, f: [road([2], [0.5, 0.88]), field(ALL, [0.18, 0.2])] },
+  d1: tileVariant('U', 2, 'dragon', { dragon: true }),
+  d2: tileVariant('V', 2, 'dragon', { dragon: true }),
+  d3: tileVariant('E', 1, 'dragon', { dragon: true }),
+  d4: tileVariant('B', 1, 'dragon', { dragon: true }),
+  d5: tileVariant('N', 1, 'dragon', { dragon: true }),
+  g1: { n: 2, set: 'dragon', portal: true, pp: [0.5, 0.5], f: [field(ALL, [0.18, 0.2])] },
+  g2: tileVariant('U', 1, 'dragon', { portal: true, pp: [0.78, 0.22] }),
+  q1: variant('E', 2, 'dragon', 0, { princess: true, mp: [0.25, 0.1] }),
+  q2: variant('R', 1, 'dragon', 0, { princess: true, mp: [0.2, 0.2] }),
+  q3: variant('N', 1, 'dragon', 0, { princess: true, mp: [0.6, 0.15] }),
+  q4: variant('G', 1, 'dragon', 0, { princess: true, mp: [0.5, 0.75] }),
+});
+
 export const GOODS = { wine: 'вино', grain: 'зерно', cloth: 'ткань' };
 
 // Возвращает признаки тайла с учётом поворота (rot — число четвертей по часовой).
@@ -139,6 +158,7 @@ export function buildDeck(opts = {}, rand = Math.random) {
   const sets = new Set(['base']);
   if (opts.inns) sets.add('inns');
   if (opts.traders) sets.add('traders');
+  if (opts.dragon) sets.add('dragon');
   const start = startTile(opts);
   let deck = [];
   for (const [k, t] of Object.entries(TILES)) {

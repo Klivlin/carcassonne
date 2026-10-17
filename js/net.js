@@ -1,9 +1,10 @@
-// Сетевая игра через публичный MQTT-брокер (WebSocket) — работает с любого хостинга
-// и за любым NAT. Хост хранит состояние и рассылает его всем; гости шлют ему ходы.
+// Сетевая игра через публичный MQTT-брокер (WebSocket) — работает с любого хостинга и за любым NAT.
+// Хоста нет: состояние партии лежит на брокере (retained-сообщение), и каждый игрок,
+// сделав ход, публикует новое состояние. Кто бы ни вышел, остальные могут продолжать.
 const BROKER = 'wss://broker.emqx.io:8084/mqtt';
-const ROOT = 'carcassonne-ru/v1/';
+const ROOT = 'carcassonne-ru/v2/';
 const HEARTBEAT = 8000;
-const TIMEOUT = 25000;
+export const TIMEOUT = 25000;
 
 export function randomCode() {
   const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -12,69 +13,51 @@ export function randomCode() {
 
 const encode = msg => JSON.stringify(msg);
 const decode = buf => { try { return JSON.parse(buf.toString()); } catch { return null; } };
-const connect = () => mqtt.connect(BROKER, { reconnectPeriod: 2000, connectTimeout: 10000, keepalive: 30 });
 
-// Хост: onMessage(key, msg) вызывается на каждое сообщение от гостя.
-export function host(code, { onReady, onMessage, onLeave, onError, onLive }) {
+// Подключение к комнате. Обработчики:
+//   onLobby(lobby)    — состав комнаты и режимы до начала партии;
+//   onState(state)    — новое состояние партии;
+//   onPing(key, name) — игрок в сети;
+//   onChat(msg), onLive(msg), onStatus(text), onReady().
+export function room(code, key, name, h) {
   const base = ROOT + code;
-  const client = connect();
-  const seen = new Map(); // key -> время последнего сообщения
-  let last = null;
+  const client = mqtt.connect(BROKER, { reconnectPeriod: 2000, connectTimeout: 10000, keepalive: 30 });
+  const ping = () => client.connected && client.publish(base + '/ping', encode({ key, name }), { qos: 0 });
+  h.onStatus('Подключение…');
   client.on('connect', () => {
-    client.subscribe([base + '/up', base + '/live'], { qos: 1 }, err => err ? onError(err) : onReady());
+    client.subscribe([base + '/lobby', base + '/state', base + '/ping', base + '/chat', base + '/chatlog', base + '/live'], { qos: 1 }, () => {
+      h.onStatus('');
+      ping();
+      h.onReady();
+    });
   });
-  client.on('error', e => onError(e));
-  client.on('message', (topic, buf) => {
-    const msg = decode(buf);
-    if (!msg || !msg.key) return;
-    if (topic.endsWith('/live')) return onLive(msg);
-    const fresh = !seen.has(msg.key);
-    seen.set(msg.key, Date.now());
-    if (msg.type === 'ping') { if (fresh) onMessage(msg.key, { type: 'hello', name: msg.name }); return; }
-    onMessage(msg.key, msg);
-  });
-  const timer = setInterval(() => {
-    let left = false;
-    for (const [k, t] of seen) if (Date.now() - t > TIMEOUT) { seen.delete(k); left = true; }
-    if (left) onLeave();
-    else if (last) client.publish(base + '/down', encode({ ...last, t: Date.now() }), { qos: 1, retain: true });
-  }, HEARTBEAT);
-  return {
-    send(k, msg) { client.publish(base + '/to/' + k, encode(msg), { qos: 1 }); },
-    broadcast(msg) { last = msg; client.publish(base + '/down', encode({ ...msg, t: Date.now() }), { qos: 1, retain: true }); },
-    live(msg) { client.publish(base + '/live', encode(msg), { qos: 0 }); },
-    online: () => new Set(seen.keys()),
-    destroy() { clearInterval(timer); client.end(true); },
-  };
-}
-
-// Гость: подписывается на состояние комнаты и шлёт хосту ходы.
-export function join(code, key, name, { onMessage, onStatus, onLive }) {
-  const base = ROOT + code;
-  const client = connect();
-  let lastSync = 0;
-  const ping = () => client.connected && client.publish(base + '/up', encode({ type: 'ping', key, name }), { qos: 1 });
-  onStatus('Подключение…');
-  client.on('connect', () => {
-    client.subscribe([base + '/down', base + '/to/' + key, base + '/live'], { qos: 1 });
-    client.publish(base + '/up', encode({ type: 'hello', key, name }), { qos: 1 });
-    onStatus(lastSync ? '' : 'Ждём ответа от хоста…');
-  });
-  client.on('reconnect', () => onStatus('Переподключение…'));
+  client.on('reconnect', () => h.onStatus('Переподключение…'));
+  client.on('offline', () => h.onStatus('Нет связи с сервером…'));
   client.on('message', (topic, buf) => {
     const msg = decode(buf);
     if (!msg) return;
-    if (topic.endsWith('/live')) return onLive(msg);
-    if (msg.type === 'sync') { if (!lastSync) onStatus(''); lastSync = Date.now(); }
-    onMessage(msg);
+    const t = topic.slice(base.length + 1);
+    // Ошибка в обработке одного сообщения не должна рвать соединение.
+    try {
+      if (t === 'lobby') h.onLobby(msg);
+      else if (t === 'state') h.onState(msg);
+      else if (t === 'ping') h.onPing(msg.key, msg.name);
+      else if (t === 'chat') h.onChat(msg);
+      else if (t === 'chatlog') for (const m of msg) h.onChat(m);
+      else if (t === 'live' && msg.key !== key) h.onLive(msg);
+    } catch (e) { console.error(e); }
   });
-  const timer = setInterval(() => {
-    ping();
-    if (client.connected) onStatus(Date.now() - lastSync > TIMEOUT ? 'Хост сейчас не в сети — ждём его…' : '');
-  }, HEARTBEAT);
+  const timer = setInterval(ping, HEARTBEAT);
   return {
-    send(msg) { client.publish(base + '/up', encode({ ...msg, key }), { qos: 1 }); },
-    live(msg) { client.publish(base + '/live', encode({ ...msg, key }), { qos: 0 }); },
+    lobby(l) { client.publish(base + '/lobby', encode(l), { qos: 1, retain: true }); },
+    state(s) { client.publish(base + '/state', encode(s), { qos: 1, retain: true }); },
+    // Сообщение и последние 30 сообщений (retained) — чтобы вернувшиеся видели историю.
+    chat(m, recent) {
+      client.publish(base + '/chat', encode(m), { qos: 1 });
+      client.publish(base + '/chatlog', encode(recent), { qos: 1, retain: true });
+    },
+    live(m) { client.publish(base + '/live', encode({ ...m, key }), { qos: 0 }); },
+    ping,
     destroy() { clearInterval(timer); client.end(true); },
   };
 }
