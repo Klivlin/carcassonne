@@ -1,10 +1,10 @@
-import { TILES, features } from './tiles.js?v=7';
+import { TILES, features } from './tiles.js?v=8';
 import {
   newGame, placements, canPlace, applyTurn, applyDragon, skipTurn, figureKinds, portalTargets,
   princessTargets, dragonOptions, describe, key, unkey, COLORS, MODES,
-} from './game.js?v=7';
-import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=7';
-import * as net from './net.js?v=7';
+} from './game.js?v=8';
+import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=8';
+import * as net from './net.js?v=8';
 
 const $ = s => document.querySelector(s);
 const store = {
@@ -258,7 +258,7 @@ function setState(s) {
 function commit(fn) {
   const next = clone(app.state);
   try { fn(next); } catch (e) { gameMsg(e.message); return; }
-  next.log = next.log.slice(-60);
+  next.log = next.log.slice(-30);
   gameMsg('');
   setState(next);
   if (app.kind === 'online') {

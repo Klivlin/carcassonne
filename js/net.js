@@ -2,14 +2,19 @@
 // Хоста нет: состояние партии лежит на брокере (retained-сообщение), и каждый игрок,
 // сделав ход, публикует новое состояние. Кто бы ни вышел, остальные могут продолжать.
 //
-// Подключаемся сразу к двум брокерам и шлём всё в оба: если у игрока провайдер «замораживает»
-// соединение с одним из них, сообщения дойдут через другой. Дубли отсеивает main.js.
-const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+// Подключаемся сразу к нескольким брокерам на разных хостингах и шлём всё во все: если у игрока
+// провайдер «замораживает» соединение с одним из них, сообщения дойдут через другой.
+// Дубли отсеивает main.js.
+const BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',      // AWS
+  'wss://broker.hivemq.com:8884/mqtt',   // AWS Франкфурт
+  'wss://test.mosquitto.org:8081',       // OVH Франция
+];
 const ROOT = 'carcassonne-ru/v2/';
-const HEARTBEAT = 3000;
+const HEARTBEAT = 2000;
 // Своё эхо не вернулось за это время — соединение «замёрзло» (вкладка спала, сеть сменилась,
 // провайдер притормозил). Переподключаемся, не дожидаясь, пока это заметит браузер.
-const STALE = 7000;
+const STALE = 5000;
 export const TIMEOUT = 15000;
 
 export function randomCode() {
@@ -29,17 +34,19 @@ const TOPICS = ['lobby', 'state', 'ping', 'chat', 'chatlog', 'live'];
 export function room(code, key, name, h) {
   const base = ROOT + code;
   let closed = false;
-  const pingMsg = encode({ key, name });
+  // В пинге — какие брокеры у этого игрока сейчас живы (e/h/m), для диагностики.
+  const pingMsg = () => encode({ key, name, ok: links.map(l => (l.healthy() ? l.tag : '-')).join('') });
 
-  const links = BROKERS.map(url => {
+  let links = [];
+  links = BROKERS.map(url => {
     // reschedulePings: false — PINGREQ уходит по расписанию, даже если мы сами что-то шлём.
     // queueQoSZero: false — не копить «живые» сообщения, пока связи нет: они устаревают.
     const client = mqtt.connect(url, {
       reconnectPeriod: 1000, connectTimeout: 6000, keepalive: 10, reschedulePings: false, queueQoSZero: false,
     });
-    const link = { url, client, lastEcho: Date.now(), ready: false };
+    const link = { url, client, tag: url.split('//')[1].split('.')[1][0], lastEcho: Date.now(), ready: false };
     link.healthy = () => link.ready && client.connected && Date.now() - link.lastEcho < STALE;
-    link.ping = () => client.connected && client.publish(base + '/ping', pingMsg, { qos: 0 });
+    link.ping = () => client.connected && client.publish(base + '/ping', pingMsg(), { qos: 0 });
     link.revive = () => {
       if (closed) return;
       link.ready = false;
