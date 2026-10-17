@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Каркассон онлайн</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><rect width='10' height='10' fill='%2393b95a'/><path d='M0 0h10L5 5z' fill='%23d2ad74'/></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+</head>
+<body>
+  <section id="menu" class="screen">
+    <div class="card">
+      <h1>Каркассон</h1>
+      <p class="sub">Классическая настольная игра — играйте с друзьями прямо в браузере</p>
+      <label>Ваше имя <input id="name" maxlength="16" placeholder="Например, Аня"></label>
+      <div id="resume"></div>
+      <h2>Онлайн</h2>
+      <button id="btn-host" class="primary">Создать комнату</button>
+      <div class="row">
+        <input id="code" maxlength="5" placeholder="Код комнаты" autocapitalize="characters">
+        <button id="btn-join">Войти</button>
+      </div>
+      <h2>На одном устройстве</h2>
+      <div id="local-names"></div>
+      <button id="btn-local">Начать игру</button>
+      <p id="menu-msg" class="msg"></p>
+      <details>
+        <summary>Правила кратко</summary>
+        <p>В свой ход вытяните тайл и приложите его к полю так, чтобы стороны совпадали (город к городу, дорога к дороге, поле к полю). Затем можно поставить на этот тайл фишку: в город (рыцарь), на дорогу (разбойник), в монастырь (монах) или на поле (крестьянин, лёжа) — если эта область ещё никем не занята.</p>
+        <p><b>Город</b> завершён — 2 очка за тайл и 2 за щит. <b>Дорога</b> — 1 очко за тайл. <b>Монастырь</b>, окружённый 8 тайлами, — 9 очков. Фишки с завершённых объектов возвращаются.</p>
+        <p>В конце: незаконченные города — по 1 за тайл и щит, дороги — по 1, монастыри — 1 + соседи. <b>Поля</b> — 3 очка за каждый завершённый город, примыкающий к полю. Очки получает тот, у кого больше фишек в области (при равенстве — все лидеры).</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="lobby" class="screen hidden">
+    <div class="card">
+      <h1>Комната <span id="lobby-code" class="code"></span></h1>
+      <p>Отправьте друзьям ссылку:</p>
+      <div class="row"><input id="invite" readonly><button id="btn-copy">Копировать</button></div>
+      <h2>Игроки</h2>
+      <ul id="lobby-players" class="plist"></ul>
+      <button id="btn-start" class="primary">Начать игру</button>
+      <p id="lobby-msg" class="msg"></p>
+      <button id="btn-leave" class="link">← В меню</button>
+    </div>
+  </section>
+
+  <section id="game" class="screen hidden">
+    <canvas id="board"></canvas>
+    <div class="zoom">
+      <button id="zoom-in" title="Приблизить">+</button>
+      <button id="zoom-out" title="Отдалить">−</button>
+      <button id="zoom-fit" title="Показать всё">⤢</button>
+    </div>
+    <aside id="panel">
+      <div class="top">
+        <span id="room-info"></span>
+        <button id="btn-menu" class="link">Меню</button>
+      </div>
+      <ul id="players" class="plist"></ul>
+      <div class="current">
+        <canvas id="preview" width="200" height="200"></canvas>
+        <div>
+          <div id="turn-info"></div>
+          <div id="deck-info" class="muted"></div>
+          <div class="btns">
+            <button id="btn-rotate" title="R">⟳ Повернуть</button>
+            <button id="btn-end" class="primary" title="Enter">✓ Завершить ход</button>
+          </div>
+        </div>
+      </div>
+      <p id="hint" class="muted"></p>
+      <p id="game-msg" class="msg"></p>
+      <ol id="log"></ol>
+    </aside>
+    <div id="final" class="overlay hidden">
+      <div class="card">
+        <h1>Игра окончена</h1>
+        <ul id="final-list" class="plist"></ul>
+        <button id="btn-again" class="primary">Сыграть ещё раз</button>
+        <button id="btn-close-final">Посмотреть поле</button>
+      </div>
+    </div>
+  </section>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
