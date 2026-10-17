@@ -1,10 +1,10 @@
-import { TILES, features } from './tiles.js?v=4';
+import { TILES, features } from './tiles.js?v=5';
 import {
   newGame, placements, canPlace, applyTurn, applyDragon, skipTurn, figureKinds, portalTargets,
   princessTargets, dragonOptions, describe, key, unkey, COLORS, MODES,
-} from './game.js?v=4';
-import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=4';
-import * as net from './net.js?v=4';
+} from './game.js?v=5';
+import { drawTile, drawFigure, drawDragon, hitFeature } from './render.js?v=5';
+import * as net from './net.js?v=5';
 
 const $ = s => document.querySelector(s);
 const store = {
@@ -490,7 +490,7 @@ function hintHtml(d) {
     title = '🏰 Город' + (d.cathedral ? ' с собором' : '');
     info = `${d.tiles} тайл. · щитов: ${d.shields}`;
   } else if (d.t === 'road') {
-    title = '🛤️ Дорога' + (d.inn ? ' с трактиром' : '');
+    title = '🛤️ Дорога' + (d.inn ? ' с таверной' : '');
     info = `${d.tiles} тайл.`;
   } else if (d.t === 'monastery') {
     title = '⛪ Монастырь';

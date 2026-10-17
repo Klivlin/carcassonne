@@ -1,0 +1,38 @@
+Copyright (c) 2026 Klivlin. Все права защищены. / All rights reserved.
+
+Исходный код, графика и тексты этого проекта принадлежат автору.
+Код открыт только для просмотра. Без письменного разрешения автора запрещено
+копировать, изменять, распространять, публиковать (в том числе на других сайтах
+и в других репозиториях), продавать или иным образом использовать этот проект
+или его части. Играть в опубликованную версию на https://klivlin.github.io/carcassonne/
+можно свободно.
+
+The source code, graphics and texts of this project are the property of the author.
+The code is published for viewing only. Copying, modifying, distributing,
+republishing (including on other websites or repositories), selling or otherwise
+using this project or any part of it without the author's written permission is
+prohibited. Playing the published version at https://klivlin.github.io/carcassonne/
+is free.
+
+--------------------------------------------------------------------------------
+
+Товарные знаки / Trademarks
+
+Это неофициальная фанатская некоммерческая реализация. Проект не связан с
+Hans im Glück Verlags-GmbH, Z-Man Games или Asmodee, не одобрен и не
+спонсируется ими. Carcassonne — товарный знак Hans im Glück Verlags-GmbH.
+Вся графика игры нарисована программно с нуля; оригинальные иллюстрации,
+тексты правил и другие материалы правообладателей не используются.
+
+This is an unofficial, non-commercial fan implementation. It is not affiliated
+with, endorsed or sponsored by Hans im Glück Verlags-GmbH, Z-Man Games or
+Asmodee. Carcassonne is a trademark of Hans im Glück Verlags-GmbH. All game
+graphics are drawn programmatically from scratch; no original artwork, rulebook
+text or other materials of the rights holders are used.
+
+--------------------------------------------------------------------------------
+
+Сторонние компоненты / Third-party components
+
+MQTT.js (https://github.com/mqttjs/MQTT.js) — загружается с CDN unpkg.com,
+лицензия MIT, Copyright (c) 2015-2016 MQTT.js contributors.

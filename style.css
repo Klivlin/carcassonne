@@ -68,6 +68,7 @@ summary { cursor: pointer; }
 #local-names input { margin: 0; }
 #resume button { width: 100%; margin-top: 12px; }
 
+.legal { margin: 18px 0 0; font-size: 11px; line-height: 1.4; color: var(--muted); opacity: .85; }
 .modes { display: flex; flex-direction: column; gap: 6px; }
 .mode {
   display: flex; gap: 10px; align-items: flex-start; font-weight: 400; padding: 8px 10px;
