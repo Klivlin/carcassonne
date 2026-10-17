@@ -1,6 +1,6 @@
 import { features } from './tiles.js';
-import { newGame, placements, canPlace, applyTurn, meepleOptions, key, unkey, COLORS } from './game.js';
-import { drawTile, drawMeeple } from './render.js';
+import { newGame, placements, canPlace, applyTurn, figureKinds, key, unkey, COLORS, MODES } from './game.js';
+import { drawTile, drawFigure } from './render.js';
 import * as net from './net.js';
 
 const $ = s => document.querySelector(s);
@@ -26,6 +26,7 @@ const app = {
   hover: null,           // клетка под курсором { x, y }
   ghost: null,           // что сейчас делает соперник: { key, seq, tent, hover }
   finalShown: false,
+  opts: store.get('carc-opts') || {},  // включённые дополнения
 };
 store.set('carc-key', app.myKey);
 
@@ -44,6 +45,7 @@ function myName() {
 
 function initMenu() {
   $('#name').value = store.get('carc-name') || '';
+  renderModes($('#modes'), true);
   const box = $('#local-names');
   const saved = store.get('carc-local-names') || ['', ''];
   for (let i = 0; i < 6; i++) {
@@ -88,9 +90,33 @@ function initMenu() {
     store.set('carc-local-names', names);
     const ps = names.filter(Boolean);
     if (ps.length < 2) return menuMsg('Нужно минимум 2 игрока');
-    startLocal(newGame(ps.map(name => ({ name, key: uid() }))));
+    startLocal(newGame(ps.map(name => ({ name, key: uid() })), app.opts));
   };
 }
+// Переключатели дополнений. editable=false — только просмотр (гость в лобби).
+function renderModes(box, editable) {
+  box.replaceChildren(...Object.entries(MODES).map(([id, m]) => {
+    const label = document.createElement('label');
+    label.className = 'mode' + (app.opts[id] ? ' on' : '');
+    label.innerHTML = `<input type="checkbox"><span class="mi"></span><span><b></b><small></small></span>`;
+    const cb = label.querySelector('input');
+    cb.checked = !!app.opts[id];
+    cb.disabled = !editable;
+    label.querySelector('.mi').textContent = m.icon;
+    label.querySelector('b').textContent = m.name;
+    label.querySelector('small').textContent = m.desc;
+    cb.onchange = () => {
+      app.opts = { ...app.opts, [id]: cb.checked };
+      store.set('carc-opts', app.opts);
+      label.classList.toggle('on', cb.checked);
+      if (app.kind === 'host' && !app.state) hostSync();
+    };
+    return label;
+  }));
+}
+
+const modesText = opts => Object.entries(MODES).filter(([id]) => opts && opts[id]).map(([, m]) => m.icon + ' ' + m.name).join(' · ');
+
 const menuMsg = t => { $('#menu-msg').textContent = t; };
 
 // ---------- Режимы ----------
@@ -142,7 +168,7 @@ function hostSync() {
   app.online = app.conn ? app.conn.online() : new Set();
   app.online.add(app.myKey);
   store.set('carc-host', { code: app.code, lobby: app.lobby, state: app.state });
-  app.conn && app.conn.broadcast({ type: 'sync', lobby: app.lobby, state: app.state, online: [...app.online] });
+  app.conn && app.conn.broadcast({ type: 'sync', lobby: app.lobby, opts: app.opts, state: app.state, online: [...app.online] });
   if (app.state && app.mode !== 'game') { show('game'); fitView(); }
   update();
 }
@@ -162,6 +188,7 @@ function startGuest(code) {
       if (msg.type === 'sync') {
         const prevSeq = app.state ? app.state.seq : -1;
         app.lobby = msg.lobby;
+        if (msg.opts) app.opts = msg.opts;
         app.state = msg.state;
         app.online = new Set(msg.online);
         if (app.state && app.mode !== 'game') { show('game'); fitView(); }
@@ -222,10 +249,17 @@ function tentBoard() {
   return b;
 }
 
-function tentOptions() {
-  if (!app.tent || app.state.players[app.state.turn].meeples <= 0) return [];
-  return meepleOptions(tentBoard(), app.tent.x, app.tent.y);
+// Какие фигуры можно поставить на каждый признак тайла-кандидата: { fi: [kinds] }.
+function tentKinds() {
+  if (!app.tent) return {};
+  const b = tentBoard(), s = app.state, res = {};
+  features(s.current, app.tent.r).forEach((f, i) => {
+    const ks = figureKinds(s, b, app.tent.x, app.tent.y, i, s.turn);
+    if (ks.length) res[i] = ks;
+  });
+  return res;
 }
+const tentOptions = () => Object.keys(tentKinds()).map(Number);
 
 function rotate() {
   if (!isMyTurn()) return;
@@ -233,6 +267,7 @@ function rotate() {
     const rs = rotationsAt(app.tent.x, app.tent.y);
     app.tent.r = rs[(rs.indexOf(app.tent.r) + 1) % rs.length];
     app.tent.f = null;
+    app.tent.kind = null;
     app.rot = app.tent.r;
   } else app.rot = (app.rot + 1) % 4;
   update();
@@ -265,14 +300,22 @@ function clickCell(wx, wy) {
       const d = Math.hypot(fs[i].p[0] - fx, fs[i].p[1] - fy);
       if (d < bd) { bd = d; best = i; }
     }
-    if (best != null) app.tent.f = app.tent.f === best ? null : best;
-    else rotate();
+    if (best != null) {
+      // Повторные нажатия перебирают фигуры: фишка → большая → строитель → ничего.
+      const ks = tentKinds()[best];
+      if (app.tent.f !== best) { app.tent.f = best; app.tent.kind = ks[0]; }
+      else {
+        const next = ks[ks.indexOf(app.tent.kind) + 1];
+        if (next) app.tent.kind = next;
+        else { app.tent.f = null; app.tent.kind = null; }
+      }
+    } else rotate();
     update();
     return;
   }
   const rs = rotationsAt(gx, gy);
   if (rs.length) {
-    app.tent = { x: gx, y: gy, r: rs.includes(app.rot) ? app.rot : rs[0], f: null };
+    app.tent = { x: gx, y: gy, r: rs.includes(app.rot) ? app.rot : rs[0], f: null, kind: null };
     app.rot = app.tent.r;
   } else app.tent = null;
   update();
@@ -348,13 +391,20 @@ function draw() {
       ctx.strokeRect(px + 3, py + 3, sz - 6, sz - 6);
     }
   }
-  // Фишки.
+  // Фишки и строители.
   for (const [k, t] of Object.entries(s.board)) {
-    if (!t.m) continue;
     const [x, y] = unkey(k);
-    const f = features(t.t, t.r)[t.m.f];
-    const [px, py] = toScreen(x + f.p[0], y + f.p[1]);
-    drawMeeple(ctx, px, py, sz * 0.26, s.players[t.m.p].color, f.t === 'field');
+    const fs = features(t.t, t.r);
+    if (t.m) {
+      const f = fs[t.m.f];
+      const [px, py] = toScreen(x + f.p[0], y + f.p[1]);
+      drawFigure(ctx, t.m.big ? 'big' : 'meeple', px, py, sz * 0.26, s.players[t.m.p].color, f.t === 'field');
+    }
+    if (t.b) {
+      const f = fs[t.b.f];
+      const [px, py] = toScreen(x + f.p[0] + 0.16, y + f.p[1] + 0.05);
+      drawFigure(ctx, 'builder', px, py, sz * 0.26, s.players[t.b.p].color);
+    }
   }
   // Что сейчас делает соперник.
   const g = app.ghost;
@@ -373,7 +423,7 @@ function draw() {
       if (g.tent.f != null) {
         const f = features(s.current, g.tent.r)[g.tent.f];
         const [mx, my] = toScreen(g.tent.x + f.p[0], g.tent.y + f.p[1]);
-        drawMeeple(ctx, mx, my, sz * 0.26, color, f.t === 'field');
+        drawFigure(ctx, g.tent.kind || 'meeple', mx, my, sz * 0.26, color, f.t === 'field');
       }
     } else if (g.hover) {
       const [px, py] = toScreen(g.hover.x, g.hover.y);
@@ -405,7 +455,7 @@ function draw() {
     }
     if (t.f != null) {
       const [mx, my] = toScreen(t.x + fs[t.f].p[0], t.y + fs[t.f].p[1]);
-      drawMeeple(ctx, mx, my, sz * 0.26, color, fs[t.f].t === 'field');
+      drawFigure(ctx, t.kind || 'meeple', mx, my, sz * 0.26, color, fs[t.f].t === 'field');
     }
   }
 }
@@ -422,12 +472,21 @@ function drawPreview() {
 }
 
 // ---------- Панель ----------
+function figuresText(p, s) {
+  const o = s.opts || {};
+  let t = `<span title="Фишки">♟${p.meeples}</span>`;
+  if (o.inns) t += ` <span title="Большая фишка">♜${p.big}</span>`;
+  if (o.traders) t += ` <span title="Строитель">🔨${p.builder}</span>` +
+    ` <span title="Вино, зерно, ткань">🍷${p.goods.wine} 🌾${p.goods.grain} 🧵${p.goods.cloth}</span>`;
+  return t;
+}
+
 function playerRow(p, i, s) {
   const li = document.createElement('li');
   if (s && s.phase === 'play' && s.turn === i) li.classList.add('turn');
   const online = app.kind === 'local' || app.online.has(p.key);
   li.innerHTML = `<span class="dot"></span><span class="nm"></span>` +
-    (s ? `<span class="mp" title="Свободные фишки">♟${p.meeples}</span><span class="score">${p.score}</span>` : '');
+    (s ? `<span class="mp">${figuresText(p, s)}</span><span class="score">${p.score}</span>` : '');
   li.querySelector('.dot').style.background = p.color || COLORS[i];
   li.querySelector('.nm').textContent = p.name + (p.key === app.myKey && app.kind !== 'local' ? ' (вы)' : '');
   if (!online) li.querySelector('.nm').classList.add('off');
@@ -442,22 +501,25 @@ function update() {
     $('#lobby-players').replaceChildren(...app.lobby.map((p, i) => playerRow(p, i, null)));
     $('#btn-start').classList.toggle('hidden', app.kind !== 'host');
     $('#btn-start').disabled = app.lobby.length < 2;
+    renderModes($('#lobby-modes'), app.kind === 'host' && !app.state);
     $('#btn-start').textContent = app.lobby.length < 2 ? 'Ждём хотя бы ещё одного игрока…' : `Начать игру (${app.lobby.length} игр.)`;
   }
   const s = app.state;
   if (!s) return;
   $('#room-info').innerHTML = app.kind === 'local' ? 'Игра на одном устройстве' : `Комната <b class="code">${app.code}</b>`;
+  $('#modes-info').textContent = modesText(s.opts);
   $('#players').replaceChildren(...s.players.map((p, i) => playerRow(p, i, s)));
   const cur = s.players[s.turn];
   const mine = isMyTurn();
   $('#turn-info').textContent = s.phase === 'end' ? 'Игра окончена' :
-    mine ? (app.kind === 'local' ? `Ходит ${cur.name}` : 'Ваш ход!') : `Ходит ${cur.name}`;
+    (mine ? (app.kind === 'local' ? `Ходит ${cur.name}` : 'Ваш ход!') : `Ходит ${cur.name}`) + (s.bonus ? ' (доп. ход 🔨)' : '');
   $('#deck-info').textContent = `Осталось тайлов: ${s.deck.length + (s.current ? 1 : 0)}`;
   $('#btn-rotate').disabled = !mine;
   $('#btn-end').disabled = !mine || !app.tent;
   $('#hint').textContent = !mine ? '' : !app.tent
     ? 'Нажмите на подсвеченную клетку, чтобы положить тайл.'
-    : 'Нажмите на тайл, чтобы повернуть. Кружки — куда можно поставить фишку. Затем «Завершить ход».';
+    : 'Нажмите на тайл, чтобы повернуть. Кружки — куда можно поставить фигуру; повторное нажатие на кружок меняет фигуру' +
+      ((s.opts || {}).inns || (s.opts || {}).traders ? ' (обычная → большая → строитель → убрать)' : '') + '. Затем «Завершить ход».';
   $('#log').replaceChildren(...s.log.slice(-40).reverse().map(t => {
     const li = document.createElement('li'); li.textContent = t; return li;
   }));
@@ -556,13 +618,13 @@ $('#btn-copy').onclick = () => {
 };
 $('#btn-start').onclick = () => {
   if (app.kind !== 'host' || app.lobby.length < 2) return;
-  app.state = newGame(app.lobby);
+  app.state = newGame(app.lobby, app.opts);
   hostSync();
   fitView();
 };
 $('#btn-again').onclick = () => {
   const players = app.state.players.map(p => ({ name: p.name, key: p.key }));
-  app.state = newGame(players);
+  app.state = newGame(players, app.state.opts || {});
   app.finalShown = false;
   app.tent = null;
   if (app.kind === 'host') hostSync();

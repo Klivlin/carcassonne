@@ -72,6 +72,20 @@ summary { cursor: pointer; }
 .overlay .card button { margin-top: 8px; width: 100%; }
 #game canvas#board { right: 320px; width: calc(100% - 320px); }
 
+.modes { display: flex; flex-direction: column; gap: 6px; }
+.mode {
+  display: flex; gap: 10px; align-items: flex-start; font-weight: 400; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer;
+}
+.mode.on { border-color: var(--accent); background: #fff4ec; }
+.mode input { width: auto; margin: 3px 0 0; accent-color: var(--accent); }
+.mode input:disabled { opacity: .7; }
+.mode .mi { font-size: 20px; line-height: 1.2; }
+.mode b { display: block; font-size: 14px; }
+.mode small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.small { font-size: 12px; margin-bottom: 6px; }
+.plist .mp { white-space: nowrap; }
+
 @media (max-width: 720px) {
   #panel { top: auto; width: 100%; height: 42%; box-shadow: 0 -4px 20px #0004; border-radius: 14px 14px 0 0; }
   #game canvas#board { right: 0; width: 100%; height: 58%; }

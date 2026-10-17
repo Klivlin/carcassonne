@@ -38,18 +38,69 @@ export const TILES = {
     field([1, 2], [0.82, 0.18]), field([3, 4], [0.82, 0.82]), field([5, 6], [0.18, 0.82]), field([7, 0], [0.18, 0.18])] },
 };
 
-export const START_TILE = 'D';
+// ---------- Дополнения ----------
+const river = e => ({ t: 'river', e, p: null });
+// Копия базового тайла с доп. свойствами у признака fi (трактир, собор, товары…).
+const variant = (base, n, set, fi, flags) => ({
+  n, set, f: TILES[base].f.map((f, i) => (i === fi ? { ...f, ...flags } : f)),
+});
+const ALL = [0, 1, 2, 3, 4, 5, 6, 7];
+
+// Река: тайлы выкладываются первыми, исток — стартовый тайл, озеро — последний.
+Object.assign(TILES, {
+  r1: { n: 1, set: 'river', spring: true, f: [river([2]), field(ALL, [0.2, 0.2])] },
+  r2: { n: 1, set: 'river', lake: true, f: [river([0]), field(ALL, [0.15, 0.85])] },
+  r3: { n: 2, set: 'river', f: [river([0, 2]), field([1, 2, 3, 4], [0.8, 0.5]), field([5, 6, 7, 0], [0.2, 0.5])] },
+  r4: { n: 3, set: 'river', f: [river([2, 3]), field([5, 6], [0.14, 0.86]), field([7, 0, 1, 2, 3, 4], [0.7, 0.3])] },
+  r5: { n: 1, set: 'river', f: [city([0], [0.5, 0.13]), river([1, 3]), field([2, 7], [0.15, 0.36], [0]), field([3, 4, 5, 6], [0.5, 0.8])] },
+  r6: { n: 1, set: 'river', f: [river([0, 2]), road([1, 3], [0.25, 0.5]),
+    field([1, 2], [0.8, 0.2]), field([3, 4], [0.8, 0.8]), field([5, 6], [0.2, 0.8]), field([7, 0], [0.2, 0.2])] },
+  r7: { n: 1, set: 'river', f: [city([0, 1], [0.73, 0.27]), river([2, 3]), field([5, 6], [0.14, 0.86]), field([4, 7], [0.3, 0.47], [0])] },
+  r8: { n: 1, set: 'river', f: [city([1], [0.87, 0.5]), city([3], [0.13, 0.5]), river([0, 2]),
+    field([1, 4], [0.68, 0.12], [0]), field([0, 5], [0.32, 0.88], [1])] },
+  r9: { n: 1, set: 'river', f: [river([0, 3]), road([1, 2], [0.68, 0.68]),
+    field([7, 0], [0.14, 0.14]), field([3, 4], [0.86, 0.86]), field([1, 2, 5, 6], [0.5, 0.5])] },
+});
+
+// Трактиры и соборы.
+Object.assign(TILES, {
+  i1: variant('U', 2, 'inns', 0, { inn: true, mp: [0.75, 0.3] }),
+  i2: variant('V', 1, 'inns', 0, { inn: true, mp: [0.65, 0.35] }),
+  i3: variant('D', 1, 'inns', 1, { inn: true, mp: [0.75, 0.35] }),
+  i4: variant('K', 1, 'inns', 1, { inn: true, mp: [0.82, 0.4] }),
+  i5: variant('C', 2, 'inns', 0, { cathedral: true, shield: false, p: [0.25, 0.75] }),
+  i6: { n: 1, set: 'inns', f: [city([0], [0.5, 0.13]), city([1], [0.87, 0.5]), city([3], [0.13, 0.5]), field([4, 5], [0.5, 0.8], [0, 1, 2])] },
+  i7: { n: 1, set: 'inns', f: [monastery(), road([1], [0.84, 0.5]), road([3], [0.16, 0.5]),
+    field([7, 0, 1, 2], [0.18, 0.2]), field([3, 4, 5, 6], [0.2, 0.85])] },
+});
+
+// Купцы и строители: города с товарами.
+Object.assign(TILES, {
+  t1: variant('E', 2, 'traders', 0, { goods: 'wine', mp: [0.25, 0.1] }),
+  t2: variant('G', 1, 'traders', 0, { goods: 'grain', mp: [0.5, 0.75] }),
+  t3: variant('N', 1, 'traders', 0, { goods: 'cloth', mp: [0.6, 0.15] }),
+  t4: variant('R', 1, 'traders', 0, { goods: 'grain', mp: [0.2, 0.2] }),
+  t5: variant('T', 1, 'traders', 0, { goods: 'wine', mp: [0.2, 0.2] }),
+  t6: variant('J', 1, 'traders', 0, { goods: 'cloth', mp: [0.25, 0.1] }),
+  t7: variant('L', 1, 'traders', 0, { goods: 'grain', mp: [0.25, 0.1] }),
+  t8: variant('P', 1, 'traders', 0, { goods: 'wine', mp: [0.6, 0.15] }),
+  t9: variant('F', 1, 'traders', 0, { goods: 'cloth', shield: false, mp: [0.8, 0.5] }),
+  t10: variant('H', 1, 'traders', 0, { goods: 'wine', mp: [0.9, 0.25] }),
+  t11: variant('C', 1, 'traders', 0, { goods: 'cloth', shield: false, mp: [0.3, 0.3] }),
+});
+
+export const GOODS = { wine: 'вино', grain: 'зерно', cloth: 'ткань' };
 
 // Возвращает признаки тайла с учётом поворота (rot — число четвертей по часовой).
 const rotCache = new Map();
 export function features(type, rot) {
-  const key = type + rot;
+  const key = type + ':' + rot;
   let r = rotCache.get(key);
   if (r) return r;
   r = TILES[type].f.map(f => ({
     ...f,
     e: f.e.map(x => f.t === 'field' ? (x + 2 * rot) % 8 : (x + rot) % 4),
-    p: rotPoint(f.p, rot),
+    p: f.p && rotPoint(f.p, rot),
   }));
   rotCache.set(key, r);
   return r;
@@ -60,24 +111,50 @@ export function rotPoint([x, y], rot) {
   return [x, y];
 }
 
-// Тип края: 'C' город, 'R' дорога, 'F' поле.
+// Тип края: 'C' город, 'R' дорога, 'W' река, 'F' поле.
 export function edgeType(type, rot, edge) {
   for (const f of features(type, rot)) {
-    if (f.t === 'city' && f.e.includes(edge)) return 'C';
-    if (f.t === 'road' && f.e.includes(edge)) return 'R';
+    if (!f.e.includes(edge) || f.t === 'field') continue;
+    if (f.t === 'city') return 'C';
+    if (f.t === 'road') return 'R';
+    if (f.t === 'river') return 'W';
   }
   return 'F';
 }
 
-export function buildDeck(rand = Math.random) {
-  const deck = [];
+export const isRiver = type => TILES[type].set === 'river';
+
+function shuffle(a, rand) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+export const startTile = opts => (opts.river ? 'r1' : 'D');
+
+// Колода: тайлы берутся с конца массива.
+export function buildDeck(opts = {}, rand = Math.random) {
+  const sets = new Set(['base']);
+  if (opts.inns) sets.add('inns');
+  if (opts.traders) sets.add('traders');
+  const start = startTile(opts);
+  let deck = [];
   for (const [k, t] of Object.entries(TILES)) {
-    const n = k === START_TILE ? t.n - 1 : t.n;
+    if (!sets.has(t.set || 'base')) continue;
+    const n = k === start ? t.n - 1 : t.n;
     for (let i = 0; i < n; i++) deck.push(k);
   }
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
+  shuffle(deck, rand);
+  if (opts.quick) deck = deck.slice(0, Math.ceil(deck.length / 2));
+  if (opts.river) {
+    const rivers = [];
+    for (const [k, t] of Object.entries(TILES)) {
+      if (t.set !== 'river' || t.spring || t.lake) continue;
+      for (let i = 0; i < t.n; i++) rivers.push(k);
+    }
+    deck.push('r2', ...shuffle(rivers, rand));
   }
   return deck;
 }
